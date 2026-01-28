@@ -1,1 +1,1286 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>道路線形計算（iPadオフラインPWA）</title>
 
+  <!-- PWA -->
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#2563eb">
+  <script>
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./sw.js");
+    }
+  </script>
+
+  <style>
+    :root{
+      --bg:#f2f6ff; --card:#fff; --text:#0f172a; --muted:#64748b; --line:#e2e8f0;
+      --accent:#2563eb; --ok:#16a34a; --warn:#b45309;
+    }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", "Segoe UI", sans-serif;
+      background:linear-gradient(135deg,#eff6ff,#eef2ff);
+      color:var(--text);
+    }
+    .wrap{ max-width:1180px; margin:0 auto; padding:16px; }
+    .header{
+      background:var(--card); border:1px solid var(--line); border-radius:14px;
+      padding:16px; box-shadow:0 10px 25px rgba(0,0,0,.06);
+    }
+    .title{ display:flex; gap:10px; align-items:center; font-weight:900; font-size:20px; flex-wrap:wrap; }
+    .badge{ font-size:12px; color:var(--muted); border:1px solid var(--line); padding:2px 8px; border-radius:999px; }
+    .grid{ display:grid; gap:10px; }
+    .grid-2{ grid-template-columns:1fr 1fr; }
+    .grid-3{ grid-template-columns:1fr 1fr 1fr; }
+    .grid-4{ grid-template-columns:1fr 1fr 1fr 1fr; }
+    @media (max-width:900px){ .grid-2,.grid-3,.grid-4{ grid-template-columns:1fr; } }
+    .row{ display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin-top:12px; }
+    label{ font-size:12px; color:var(--muted); display:block; margin-bottom:4px; }
+    input, select, button, textarea{
+      width:100%; padding:10px 10px; border:1px solid var(--line); border-radius:10px;
+      background:#fff; font-size:14px;
+    }
+    input[type="number"]{ font-variant-numeric: tabular-nums; }
+    textarea{ min-height:88px; resize:vertical; }
+    .card{
+      margin-top:14px; background:var(--card); border:1px solid var(--line); border-radius:14px;
+      padding:14px; box-shadow:0 10px 25px rgba(0,0,0,.05);
+    }
+    .card h2{ margin:0 0 10px; font-size:16px; }
+    .btn{
+      border:0; border-radius:12px; padding:10px 14px; font-weight:800; cursor:pointer;
+      background:var(--accent); color:#fff;
+    }
+    .btn:disabled{ opacity:.5; cursor:not-allowed; }
+    .btn-ghost{ background:#fff; color:var(--text); border:1px solid var(--line); }
+    .btn-ok{ background:var(--ok); }
+    .mini{ font-size:12px; color:var(--muted); }
+    .warn{ color:var(--warn); font-size:13px; margin-top:6px; }
+    table{ width:100%; border-collapse:collapse; overflow:auto; }
+    th,td{ border:1px solid var(--line); padding:8px; font-size:13px; }
+    th{ background:#f1f5f9; text-align:left; }
+    .right{ text-align:right; }
+    .pill{
+      display:inline-block; padding:3px 8px; border-radius:999px; border:1px solid var(--line);
+      font-size:12px; color:var(--muted);
+    }
+    .tabs{ display:flex; gap:8px; margin-top:12px; }
+    .tab{
+      flex:1; padding:10px; border-radius:12px; border:1px solid var(--line); background:#fff;
+      font-weight:900; cursor:pointer;
+    }
+    .tab.active{ background:#eff6ff; border-color:#bfdbfe; color:var(--accent); }
+    .kpi{ font-weight:900; color:var(--accent); }
+    .canvasWrap{ width:100%; overflow:auto; }
+    canvas{ border:1px solid var(--line); border-radius:12px; background:#fff; }
+    .footer{ margin-top:16px; text-align:center; color:var(--muted); font-size:12px; }
+  </style>
+</head>
+
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="title">
+      道路線形計算（iPadオフラインPWA）
+      <span class="badge">平面：直線/円弧/クロソイド + 左右可視化 / 測点：ピッチ表示 + 自由測点</span>
+    </div>
+
+    <div class="row">
+      <div style="flex:1; min-width:220px;">
+        <label>案件名</label>
+        <input id="projectName" type="text" />
+      </div>
+
+      <div style="width:170px;">
+        <label>座標小数桁（N/E）</label>
+        <select id="coordDecimals">
+          <option value="3">小数3桁</option>
+          <option value="4">小数4桁</option>
+        </select>
+      </div>
+
+      <div style="width:160px;">
+        <label>測点表示ピッチ（整数m）</label>
+        <input id="staPitch" type="number" step="1" min="1" />
+      </div>
+
+      <div style="width:160px;">
+        <label>出力間隔（整数m）</label>
+        <input id="outputStep" type="number" step="1" min="1" />
+      </div>
+
+      <div style="width:160px;">
+        <label>クロソイド ds(m)</label>
+        <input id="dsSpiral" type="number" step="0.1" />
+      </div>
+
+      <div style="width:170px;">
+        <label>クロソイド指定</label>
+        <select id="clothoidMode">
+          <option value="A">A値（A1/A2）</option>
+          <option value="L">Ls（長さ）</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" id="tabPlan">平面</button>
+      <button class="tab" id="tabOutput">出力</button>
+      <button class="tab" id="tabSave">保存</button>
+    </div>
+  </div>
+
+  <div id="viewPlan"></div>
+  <div id="viewOutput" style="display:none;"></div>
+  <div id="viewSave" style="display:none;"></div>
+
+  <div class="footer">ホーム画面に追加して使う前提（PWA）。まずは一度オンラインで開いてキャッシュしてね。</div>
+</div>
+
+<script>
+/* =========================
+   State + autosave (iPad)
+========================= */
+const LS_KEY = "road_align_pwa_state_v1";
+let state = {
+  activeTab: "plan",
+  projectName: "テスト案件",
+  coordDecimals: 3,
+  staPitch: 20,       // 測点表示ピッチ（整数m）
+  outputStep: 20,     // 出力間隔（整数m）
+  dsSpiral: 0.5,
+  clothoidMode: "A",
+
+  bp: { name: "BP", N: 0, E: 0 },
+  ep: { name: "EP", N: 0, E: 500 },
+
+  ipPoints: [
+    { id: 1, name: "IP1", N: 0, E: 0 },
+    { id: 2, name: "IP2", N: 0, E: 200 },
+    { id: 3, name: "IP3", N: 150, E: 350 },
+  ],
+  useIpCount: 3,
+
+  curveSettings: [
+    { id: 1, ipName: "IP2", R: 200, A1: 100, A2: 100, Ls: 40, direction: "auto" }
+  ],
+
+  // 自由測点：追加距離(m)で持つ
+  extraStations: [
+    // {id:1, m:101.527}
+  ],
+  nextExtraId: 1,
+
+  // 図表示
+  plotStep: 5.0,
+  showKeypoints: true,
+  showArrow: false
+};
+
+function saveState() {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch(e) {}
+}
+function loadState() {
+  const t = localStorage.getItem(LS_KEY);
+  if (!t) return;
+  try {
+    const obj = JSON.parse(t);
+    if (obj && typeof obj === "object") state = Object.assign(state, obj);
+  } catch(e) {}
+}
+loadState();
+
+/* =========================
+   Math / utilities
+========================= */
+const clamp = (x, min, max) => Math.max(min, Math.min(max, x));
+const norm = (x, y) => Math.sqrt(x * x + y * y);
+const unit = (x, y) => {
+  const len = norm(x, y);
+  return len === 0 ? [1, 0] : [x / len, y / len];
+};
+const dot = (ax, ay, bx, by) => ax * bx + ay * by;
+const crossZ = (ax, ay, bx, by) => ax * by - ay * bx;
+const wrap360 = (deg) => ((deg % 360) + 360) % 360;
+
+const azFromVec = (dE, dN) => wrap360((Math.atan2(dE, dN) * 180) / Math.PI);
+const psiFromAz = (azDeg) => (Math.PI / 2) - (azDeg * Math.PI / 180);
+const azFromPsi = (psi) => wrap360(((Math.PI / 2 - psi) * 180) / Math.PI);
+
+const fmt = (x, d) => (Number.isFinite(x) ? x.toFixed(d) : "-");
+
+/* ---- 測点（ピッチ表示） ----
+   staPitch: 100 のとき
+   s=50 -> 0+50.000
+   s=100 -> 1+0.000
+*/
+const metersToStaPitch = (m, pitch, d=3) => {
+  pitch = Math.max(1, Math.floor(pitch || 1));
+  if (!Number.isFinite(m)) return "-";
+  if (m < 0) return m.toFixed(d);
+  const k = Math.floor(m / pitch);
+  const rem = m - k * pitch;
+  return `${k}+${rem.toFixed(d)}`;
+};
+
+const parseTokenToM = (token, pitch) => {
+  pitch = Math.max(1, Math.floor(pitch || 1));
+  let s = String(token ?? "").trim();
+  if (!s) throw new Error("空です");
+  s = s.replace(/[mMｍＭ]\s*$/, "").trim(); // 末尾m許可
+  if (s.includes("+")) {
+    const [a, b] = s.split("+", 2);
+    const k = parseFloat(a.trim());
+    const rem = parseFloat(b.trim());
+    if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("測点の数値が不正");
+    return k * pitch + rem;
+  }
+  const mv = parseFloat(s);
+  if (!Number.isFinite(mv)) throw new Error("数値が不正");
+  return mv;
+};
+
+const dedupeConsecutivePoints = (pts, eps = 1e-9) => {
+  const out = [];
+  for (const p of pts) {
+    if (!out.length) { out.push(p); continue; }
+    const q = out[out.length - 1];
+    if (Math.hypot(p.E - q.E, p.N - q.N) > eps) out.push(p);
+  }
+  return out;
+};
+
+const dedupeSorted = (arr, eps = 1e-7) => {
+  const out = [];
+  for (const v of arr) {
+    if (!out.length || Math.abs(v - out[out.length - 1]) > eps) out.push(v);
+  }
+  return out;
+};
+
+const csvEscape = (v) => {
+  const s = String(v ?? "");
+  return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+
+const downloadText = (text, filename, mime="text/plain;charset=utf-8") => {
+  const blob = new Blob([text], { type: mime });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+};
+
+const downloadCSV = (rows, filename) => {
+  if (!rows?.length) return;
+  const headers = Object.keys(rows[0]);
+  const body = rows.map(r => headers.map(h => csvEscape(r[h])).join(","));
+  const csv = [headers.join(","), ...body].join("\n");
+  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+};
+
+/* =========================
+   Segment classes (Plan)
+========================= */
+class SegmentStraight {
+  constructor(s0, Ax, Ay, Bx, By) {
+    this.type = "straight";
+    this.s0 = s0;
+    const L = norm(Bx - Ax, By - Ay);
+    this.s1 = s0 + L;
+    this.length = L;
+    this.Ax = Ax; this.Ay = Ay;
+    this.Bx = Bx; this.By = By;
+    const [ux, uy] = unit(Bx - Ax, By - Ay);
+    this.az = azFromVec(ux, uy);
+  }
+  eval(s) {
+    const t = this.length === 0 ? 0 : clamp((s - this.s0) / this.length, 0, 1);
+    return { N: this.Ay + t * (this.By - this.Ay), E: this.Ax + t * (this.Bx - this.Ax), az: this.az };
+  }
+}
+
+class SegmentArc {
+  constructor(s0, x0, y0, psi0, R, L, turnSign) {
+    this.type = "arc";
+    this.s0 = s0; this.s1 = s0 + L; this.length = L;
+    this.R = R; this.turnSign = turnSign;
+    this.x0 = x0; this.y0 = y0; this.psi0 = psi0;
+
+    const nxL = -Math.sin(psi0), nyL = Math.cos(psi0);
+    this.cx = x0 + turnSign * nxL * R;
+    this.cy = y0 + turnSign * nyL * R;
+    this.rx0 = x0 - this.cx;
+    this.ry0 = y0 - this.cy;
+  }
+  eval(s) {
+    const u = clamp(s - this.s0, 0, this.length);
+    const ang = this.turnSign * (u / this.R);
+    const ca = Math.cos(ang), sa = Math.sin(ang);
+
+    const rx = ca * this.rx0 - sa * this.ry0;
+    const ry = sa * this.rx0 + ca * this.ry0;
+
+    const E = this.cx + rx;
+    const N = this.cy + ry;
+
+    const rL = norm(rx, ry);
+    let psi = this.psi0;
+    if (rL > 0) {
+      const tE = -this.turnSign * ry;
+      const tN =  this.turnSign * rx;
+      psi = Math.atan2(tN, tE);
+    }
+    return { N, E, az: azFromPsi(psi) };
+  }
+}
+
+class SegmentSpiral {
+  constructor(s0, x0, y0, psi0, R, Ls, turnSign, mode, ds) {
+    this.type = "spiral";
+    this.s0 = s0; this.s1 = s0 + Ls; this.length = Ls;
+    this.R = R;
+    this.turnSign = turnSign; // ★左右判定用
+
+    const n = Math.max(1, Math.ceil(Ls / Math.max(ds, 1e-6)));
+    const step = Ls / n;
+
+    this.ss = [0]; this.xs = [x0]; this.ys = [y0]; this.psis = [psi0];
+    let x = x0, y = y0, psi = psi0;
+
+    for (let i = 1; i <= n; i++) {
+      const sMid = (i - 0.5) * step;
+      const k = (mode === "in" ? sMid / Ls : 1 - sMid / Ls) / R; // 線形曲率
+      psi += turnSign * k * step;
+      x += Math.cos(psi) * step;
+      y += Math.sin(psi) * step;
+      this.ss.push(i * step);
+      this.xs.push(x);
+      this.ys.push(y);
+      this.psis.push(psi);
+    }
+  }
+  endState() {
+    const last = this.ss.length - 1;
+    return { x: this.xs[last], y: this.ys[last], psi: this.psis[last] };
+  }
+  eval(s) {
+    const u = clamp(s - this.s0, 0, this.length);
+    if (u <= 0) return { N: this.ys[0], E: this.xs[0], az: azFromPsi(this.psis[0]) };
+    if (u >= this.length) {
+      const last = this.ss.length - 1;
+      return { N: this.ys[last], E: this.xs[last], az: azFromPsi(this.psis[last]) };
+    }
+    let j = 0;
+    while (j + 1 < this.ss.length && this.ss[j + 1] < u) j++;
+    const t = (u - this.ss[j]) / (this.ss[j + 1] - this.ss[j]);
+    const x = this.xs[j] + t * (this.xs[j + 1] - this.xs[j]);
+    const y = this.ys[j] + t * (this.ys[j + 1] - this.ys[j]);
+    const psi = this.psis[j] + t * (this.psis[j + 1] - this.psis[j]);
+    return { N: y, E: x, az: azFromPsi(psi) };
+  }
+}
+
+const evalAlignment = (segments, s) => {
+  if (!segments?.length) return { N: 0, E: 0, az: 0 };
+  if (s <= segments[0].s0) return segments[0].eval(segments[0].s0);
+  if (s >= segments[segments.length - 1].s1) return segments[segments.length - 1].eval(segments[segments.length - 1].s1);
+  for (const seg of segments) {
+    if (s >= seg.s0 - 1e-9 && s <= seg.s1 + 1e-9) return seg.eval(s);
+  }
+  return segments[segments.length - 1].eval(segments[segments.length - 1].s1);
+};
+
+/* =========================
+   Alignment computation
+========================= */
+const computeAlignment = (ipPoints, curveSettings, dsSpiral, clothoidMode) => {
+  if (ipPoints.length < 2) return { segments: [], keypoints: [], total: 0, warnings: ["点が2点未満です"] };
+
+  const warnings = [];
+  const segments = [];
+  const keypoints = [];
+
+  let curX = ipPoints[0].E, curY = ipPoints[0].N, curSta = 0;
+
+  // 起点方位
+  {
+    const [ux, uy] = unit(ipPoints[1].E - curX, ipPoints[1].N - curY);
+    keypoints.push({ name: ipPoints[0].name, sta: 0, N: curY, E: curX, az: azFromVec(ux, uy) });
+  }
+
+  for (let i = 1; i < ipPoints.length - 1; i++) {
+    const prev = ipPoints[i - 1], curr = ipPoints[i], next = ipPoints[i + 1];
+    const [dinx, diny] = unit(curr.E - prev.E, curr.N - prev.N);
+    const [doutx, douty] = unit(next.E - curr.E, next.N - curr.N);
+
+    const Delta = Math.acos(clamp(dot(dinx, diny, doutx, douty), -1, 1));
+    const cs = curveSettings.find(c => c.ipName === curr.name);
+
+    // 曲線無し
+    if (!cs || cs.R <= 0 || Delta < 1e-9 || cs.direction === "none") {
+      if (norm(curr.E - curX, curr.N - curY) > 1e-9) {
+        const seg = new SegmentStraight(curSta, curX, curY, curr.E, curr.N);
+        segments.push(seg);
+        curSta = seg.s1; curX = curr.E; curY = curr.N;
+      }
+      continue;
+    }
+
+    const R = cs.R;
+
+    let L1, L2;
+    if (clothoidMode === "A") {
+      const A1 = cs.A1 || 0, A2 = (cs.A2 ?? A1);
+      L1 = R > 0 ? (A1 * A1) / R : 0;
+      L2 = R > 0 ? (A2 * A2) / R : 0;
+    } else {
+      L1 = cs.Ls || 0;
+      L2 = cs.Ls || 0;
+    }
+
+    const z = crossZ(dinx, diny, doutx, douty);
+    const turnSign =
+      cs.direction === "left" ? 1 :
+      cs.direction === "right" ? -1 :
+      (z >= 0 ? 1 : -1); // auto
+
+    const theta1 = L1 > 0 ? L1 / (2 * R) : 0;
+    const theta2 = L2 > 0 ? L2 / (2 * R) : 0;
+    const p = (L1 * L1 + L2 * L2) / (48 * R);
+    const DeltaC = Delta - theta1 - theta2;
+
+    if (DeltaC < -1e-9) {
+      warnings.push(`${curr.name}: クロソイド長が長すぎ（ΔC<0）`);
+      continue;
+    }
+
+    const T = (R + p) * Math.tan(Delta / 2) + (L1 + L2) / 4;
+    const Lc = R * Math.max(0, DeltaC);
+
+    const distIn = norm(curr.E - prev.E, curr.N - prev.N);
+    const distOut = norm(next.E - curr.E, next.N - curr.N);
+
+    if (distIn <= T + 1e-6 || distOut <= T + 1e-6) {
+      warnings.push(`${curr.name}: 接線長不足`);
+      continue;
+    }
+
+    const TSx = curr.E - dinx * T, TSy = curr.N - diny * T;
+    const STx = curr.E + doutx * T, STy = curr.N + douty * T;
+
+    // 直線（前回終点→TS）
+    if (norm(TSx - curX, TSy - curY) > 1e-9) {
+      const seg = new SegmentStraight(curSta, curX, curY, TSx, TSy);
+      segments.push(seg);
+      curSta = seg.s1; curX = TSx; curY = TSy;
+    }
+
+    const azTS = azFromVec(dinx, diny);
+    const psiTS = psiFromAz(azTS);
+    const staTSstart = curSta;
+    let psiSC = psiTS;
+
+    // TS→SC
+    if (L1 > 0) {
+      const sp = new SegmentSpiral(curSta, curX, curY, psiTS, R, L1, turnSign, "in", dsSpiral);
+      segments.push(sp);
+      curSta = sp.s1;
+      const end = sp.endState();
+      curX = end.x; curY = end.y; psiSC = end.psi;
+    }
+
+    const staSC = curSta;
+    let psiCS = psiSC;
+
+    // 円弧
+    if (Lc > 0) {
+      const arc = new SegmentArc(curSta, curX, curY, psiSC, R, Lc, turnSign);
+      segments.push(arc);
+      curSta = arc.s1;
+      const end = arc.eval(arc.s1);
+      curX = end.E; curY = end.N;
+      psiCS = psiFromAz(end.az);
+    }
+
+    const staCS = curSta;
+
+    // CS→ST
+    if (L2 > 0) {
+      const sp = new SegmentSpiral(curSta, curX, curY, psiCS, R, L2, turnSign, "out", dsSpiral);
+      segments.push(sp);
+      curSta = sp.s1;
+      const end = sp.endState();
+      curX = end.x; curY = end.y;
+    }
+
+    const staST = curSta;
+
+    // ST合わせ（数値積分誤差対策）
+    const err = norm(STx - curX, STy - curY);
+    if (err > Math.max(0.05, dsSpiral * 0.2)) warnings.push(`${curr.name}: ST誤差 ${err.toFixed(3)}m`);
+    curX = STx; curY = STy;
+
+    // 主要点登録
+    for (const [nm, sta] of [[`TS(${curr.name})`, staTSstart], [`SC(${curr.name})`, staSC], [`CS(${curr.name})`, staCS], [`ST(${curr.name})`, staST]]) {
+      const pt = evalAlignment(segments, sta);
+      keypoints.push({ name: nm, sta, N: pt.N, E: pt.E, az: pt.az });
+    }
+    keypoints.push({ name: `PI(${curr.name})`, sta: NaN, N: curr.N, E: curr.E, az: azTS });
+  }
+
+  // 最終直線
+  const last = ipPoints[ipPoints.length - 1];
+  if (norm(last.E - curX, last.N - curY) > 1e-9) {
+    const seg = new SegmentStraight(curSta, curX, curY, last.E, last.N);
+    segments.push(seg);
+    curSta = seg.s1;
+  }
+
+  // 終点方位
+  if (ipPoints.length >= 2) {
+    const prev = ipPoints[ipPoints.length - 2];
+    const [ux, uy] = unit(last.E - prev.E, last.N - prev.N);
+    keypoints.push({ name: last.name, sta: curSta, N: last.N, E: last.E, az: azFromVec(ux, uy) });
+  }
+
+  return { segments, keypoints, total: curSta, warnings };
+};
+
+/* =========================
+   Work points + stations
+========================= */
+const getWorkPoints = () => {
+  const k = Math.max(0, Math.min(state.useIpCount, state.ipPoints.length));
+  const mid = state.ipPoints.slice(0, k).map(p => ({ name: p.name, N: p.N, E: p.E }));
+  return dedupeConsecutivePoints([
+    { name: state.bp.name || "BP", N: state.bp.N, E: state.bp.E },
+    ...mid,
+    { name: state.ep.name || "EP", N: state.ep.N, E: state.ep.E },
+  ]);
+};
+
+const buildStationList = (total, stepInt, extraMList) => {
+  stepInt = Math.max(1, Math.floor(stepInt || 1));
+  const base = [];
+  for (let s = 0; s < total - 1e-9; s += stepInt) base.push(s);
+  base.push(total);
+
+  const extrasIn = [];
+  const notes = [];
+  for (const v of extraMList || []) {
+    if (!Number.isFinite(v)) continue;
+    if (v < -1e-9 || v > total + 1e-9) notes.push(`自由測点 ${v.toFixed(3)}m は範囲外なので除外`);
+    else extrasIn.push(clamp(v, 0, total));
+  }
+  const merged = [...base, ...extrasIn].sort((a,b)=>a-b);
+  return { stations: dedupeSorted(merged), notes };
+};
+
+/* =========================
+   Canvas plot (left/right)
+========================= */
+function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  // サンプル点を集める
+  const samples = [];
+  for (const seg of segments) {
+    if (!seg || !seg.length || seg.length <= 0) continue;
+    const t = seg.type;
+    let ss = [];
+    if (t === "straight") ss = [seg.s0, seg.s1];
+    else {
+      const n = Math.max(2, Math.ceil(seg.length / Math.max(options.plotStep, 0.1)) + 1);
+      for (let i=0;i<n;i++) ss.push(seg.s0 + i*(seg.length/(n-1)));
+    }
+    const pts = ss.map(s => ({...evalAlignment(segments, s), s}));
+    samples.push({ seg, pts });
+  }
+  if (!samples.length) return;
+
+  // bbox
+  let minE=Infinity, maxE=-Infinity, minN=Infinity, maxN=-Infinity;
+  const pushPt = (E,N)=>{ minE=Math.min(minE,E); maxE=Math.max(maxE,E); minN=Math.min(minN,N); maxN=Math.max(maxN,N); };
+  for (const block of samples) for (const p of block.pts) pushPt(p.E, p.N);
+  for (const p of workPoints) pushPt(p.E, p.N);
+  if (options.showKeypoints) for (const k of keypoints) if (Number.isFinite(k.sta)) pushPt(k.E, k.N);
+
+  // padding + scale
+  const pad = 30;
+  const dx = Math.max(1e-9, maxE - minE);
+  const dy = Math.max(1e-9, maxN - minN);
+  const sx = (W - pad*2) / dx;
+  const sy = (H - pad*2) / dy;
+  const s = Math.min(sx, sy);
+
+  const toXY = (E,N) => {
+    const x = pad + (E - minE) * s;
+    const y = H - (pad + (N - minN) * s);
+    return [x,y];
+  };
+
+  // axes: none (simple)
+
+  // seg draw
+  const strokeFor = (seg) => {
+    if (seg.type === "straight") return { w:2, col:"#0f172a" };
+    const ts = seg.turnSign || 0;
+    if (ts > 0) return { w:3, col:"#2563eb" };  // 左
+    if (ts < 0) return { w:3, col:"#ef4444" };  // 右
+    return { w:3, col:"#9333ea" };
+  };
+
+  for (const block of samples) {
+    const {seg, pts} = block;
+    const st = strokeFor(seg);
+    ctx.beginPath();
+    for (let i=0;i<pts.length;i++){
+      const [x,y] = toXY(pts[i].E, pts[i].N);
+      if (i===0) ctx.moveTo(x,y);
+      else ctx.lineTo(x,y);
+    }
+    ctx.lineWidth = st.w;
+    ctx.strokeStyle = st.col;
+    ctx.stroke();
+
+    // arrow
+    if (options.showArrow && pts.length >= 2) {
+      const mid = Math.floor(pts.length/2);
+      const p0 = pts[mid], p1 = pts[Math.min(mid+1, pts.length-1)];
+      const [x0,y0] = toXY(p0.E,p0.N);
+      const [x1,y1] = toXY(p1.E,p1.N);
+      const ang = Math.atan2(y1-y0, x1-x0);
+      const L = 10;
+      ctx.beginPath();
+      ctx.moveTo(x1,y1);
+      ctx.lineTo(x1 - L*Math.cos(ang-0.5), y1 - L*Math.sin(ang-0.5));
+      ctx.lineTo(x1 - L*Math.cos(ang+0.5), y1 - L*Math.sin(ang+0.5));
+      ctx.closePath();
+      ctx.fillStyle = st.col;
+      ctx.fill();
+    }
+  }
+
+  // points: BP/IP/EP
+  ctx.fillStyle = "#111827";
+  for (const p of workPoints) {
+    const [x,y] = toXY(p.E,p.N);
+    ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill();
+    ctx.font = "12px system-ui";
+    ctx.fillText(" " + p.name, x+6, y-6);
+  }
+
+  // keypoints
+  if (options.showKeypoints) {
+    ctx.fillStyle = "#334155";
+    ctx.font = "11px system-ui";
+    for (const k of keypoints) {
+      if (!Number.isFinite(k.sta)) continue;
+      const [x,y] = toXY(k.E,k.N);
+      ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill();
+      ctx.fillText(" " + k.name, x+6, y+12);
+    }
+  }
+
+  // legend
+  const lx=10, ly=10;
+  ctx.fillStyle = "rgba(255,255,255,0.9)";
+  ctx.strokeStyle = "#e2e8f0";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(lx,ly,240,78,10);
+  ctx.fill(); ctx.stroke();
+
+  const rows = [
+    { label:"直線", col:"#0f172a" },
+    { label:"曲線（左）", col:"#2563eb" },
+    { label:"曲線（右）", col:"#ef4444" },
+  ];
+  ctx.font = "12px system-ui";
+  for (let i=0;i<rows.length;i++){
+    const y = ly + 22 + i*18;
+    ctx.strokeStyle = rows[i].col;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(lx+12, y); ctx.lineTo(lx+50, y); ctx.stroke();
+    ctx.fillStyle = "#0f172a";
+    ctx.fillText(rows[i].label, lx+60, y+4);
+  }
+}
+
+/* =========================
+   Rendering
+========================= */
+const viewPlan = document.getElementById("viewPlan");
+const viewOutput = document.getElementById("viewOutput");
+const viewSave = document.getElementById("viewSave");
+
+const computeAll = () => {
+  const workPoints = getWorkPoints();
+  const res = computeAlignment(workPoints, state.curveSettings, state.dsSpiral, state.clothoidMode);
+  return { workPoints, res };
+};
+
+const render = () => {
+  // header
+  document.getElementById("projectName").value = state.projectName;
+  document.getElementById("coordDecimals").value = String(state.coordDecimals);
+  document.getElementById("staPitch").value = state.staPitch;
+  document.getElementById("outputStep").value = state.outputStep;
+  document.getElementById("dsSpiral").value = state.dsSpiral;
+  document.getElementById("clothoidMode").value = state.clothoidMode;
+
+  // tabs
+  const tabPlan = document.getElementById("tabPlan");
+  const tabOutput = document.getElementById("tabOutput");
+  const tabSave = document.getElementById("tabSave");
+  tabPlan.classList.toggle("active", state.activeTab === "plan");
+  tabOutput.classList.toggle("active", state.activeTab === "output");
+  tabSave.classList.toggle("active", state.activeTab === "save");
+  viewPlan.style.display = (state.activeTab === "plan") ? "" : "none";
+  viewOutput.style.display = (state.activeTab === "output") ? "" : "none";
+  viewSave.style.display = (state.activeTab === "save") ? "" : "none";
+
+  const d = Math.max(0, Math.min(4, parseInt(state.coordDecimals, 10) || 3));
+  const { workPoints, res } = computeAll();
+
+  // ---------------- PLAN VIEW ----------------
+  viewPlan.innerHTML = `
+    <div class="card">
+      <h2>BP / EP（座標m）</h2>
+      <div class="grid grid-2">
+        <div>
+          <div class="pill">BP</div>
+          <div class="grid grid-2" style="margin-top:8px;">
+            <div><label>N</label><input id="bpN" type="number" step="0.001" /></div>
+            <div><label>E</label><input id="bpE" type="number" step="0.001" /></div>
+          </div>
+        </div>
+        <div>
+          <div class="pill">EP</div>
+          <div class="grid grid-2" style="margin-top:8px;">
+            <div><label>N</label><input id="epN" type="number" step="0.001" /></div>
+            <div><label>E</label><input id="epE" type="number" step="0.001" /></div>
+          </div>
+        </div>
+      </div>
+      <div class="mini" style="margin-top:8px;">座標は m。通常は小数3桁、必要に応じて4桁。</div>
+    </div>
+
+    <div class="card">
+      <h2>IP点（BP→IP1..IPk→EP）</h2>
+      <div class="grid grid-3">
+        <div>
+          <label>使用IP数（IP1から）</label>
+          <input id="useIpCount" type="range" min="0" max="${state.ipPoints.length}" />
+          <div class="mini"><span id="useIpLabel"></span></div>
+        </div>
+        <div>
+          <button class="btn" id="addIP">+ IP追加</button>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ghost" id="resetDemo">デモ値に戻す</button>
+        </div>
+        <div>
+          <label>IP削除（名前指定）</label>
+          <select id="delIpSel">
+            <option value="">（選択）</option>
+            ${state.ipPoints.map(p=>`<option value="${p.id}">${p.name}</option>`).join("")}
+          </select>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ghost" id="delIP">選択IPを削除</button>
+        </div>
+      </div>
+
+      <div style="overflow:auto; margin-top:10px;">
+        <table>
+          <thead><tr><th>IP名</th><th>N</th><th>E</th></tr></thead>
+          <tbody>
+            ${state.ipPoints.map(p=>`
+              <tr>
+                <td><input data-ip-name="${p.id}" value="${p.name}" /></td>
+                <td><input data-ip-n="${p.id}" type="number" step="0.001" value="${p.N}" /></td>
+                <td><input data-ip-e="${p.id}" type="number" step="0.001" value="${p.E}" /></td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>曲線設定（IP名ごと）</h2>
+      <div class="grid grid-3">
+        <div class="mini">direction: auto/left/right/none、R>0 のとき曲線として扱います</div>
+        <div><button class="btn" id="addCurve">+ 曲線追加</button></div>
+        <div class="mini">A指定：L=A²/R（A1/A2） / L指定：Lsを使用</div>
+      </div>
+
+      <div style="overflow:auto; margin-top:10px;">
+        <table>
+          <thead>
+            <tr><th>対象IP</th><th>direction</th><th>R</th><th>A1</th><th>A2</th><th>Ls</th><th class="right">削除</th></tr>
+          </thead>
+          <tbody>
+            ${state.curveSettings.map(c=>`
+              <tr>
+                <td>
+                  <select data-c-ip="${c.id}">
+                    ${state.ipPoints.map(p=>`<option value="${p.name}" ${p.name===c.ipName?"selected":""}>${p.name}</option>`).join("")}
+                  </select>
+                </td>
+                <td>
+                  <select data-c-dir="${c.id}">
+                    ${["auto","left","right","none"].map(d=>`<option value="${d}" ${d===c.direction?"selected":""}>${d}</option>`).join("")}
+                  </select>
+                </td>
+                <td><input data-c-r="${c.id}" type="number" step="0.001" value="${c.R}" /></td>
+                <td><input data-c-a1="${c.id}" type="number" step="0.001" value="${c.A1 ?? 0}" /></td>
+                <td><input data-c-a2="${c.id}" type="number" step="0.001" value="${c.A2 ?? (c.A1 ?? 0)}" /></td>
+                <td><input data-c-ls="${c.id}" type="number" step="0.001" value="${c.Ls ?? 0}" /></td>
+                <td class="right"><button class="btn btn-ghost" data-c-del="${c.id}">削除</button></td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>サマリ</h2>
+      <div class="grid grid-3">
+        <div><b>総延長</b>：<span class="kpi">${res.total.toFixed(3)} m</span></div>
+        <div class="pill">警告 ${res.warnings.length} 件</div>
+        <div class="pill">IP数 ${state.ipPoints.length}（使用 ${state.useIpCount}）</div>
+      </div>
+      ${res.warnings.map(w=>`<div class="warn">⚠ ${w}</div>`).join("")}
+    </div>
+
+    <div class="card">
+      <h2>平面線形：簡易図（左/右が分かる）</h2>
+      <div class="grid grid-3">
+        <div>
+          <label>図のサンプル間隔 ds(m)</label>
+          <input id="plotStep" type="number" step="0.1" min="0.1" />
+          <div class="mini">小さいほど滑らか（重くなる）</div>
+        </div>
+        <div>
+          <label>表示</label>
+          <div class="grid grid-2">
+            <div><label class="mini"><input id="showKeypoints" type="checkbox" /> 主要点（TS/SC/CS/ST）</label></div>
+            <div><label class="mini"><input id="showArrow" type="checkbox" /> 進行方向矢印</label></div>
+          </div>
+        </div>
+        <div class="mini">
+          凡例：直線/曲線（左）/曲線（右）<br/>
+          ※曲線方向は <b>turnSign</b> を表示
+        </div>
+      </div>
+
+      <div class="canvasWrap" style="margin-top:10px;">
+        <canvas id="planCanvas" width="980" height="520"></canvas>
+      </div>
+      <div class="mini" style="margin-top:8px;">※iPadの回転/画面幅によっては横スクロールで見てね</div>
+    </div>
+  `;
+
+  // bind header inputs
+  document.getElementById("projectName").oninput = (e)=>{ state.projectName = e.target.value; saveState(); render(); };
+  document.getElementById("coordDecimals").onchange = (e)=>{ state.coordDecimals = parseInt(e.target.value,10)||3; saveState(); render(); };
+  document.getElementById("staPitch").oninput = (e)=>{ state.staPitch = Math.max(1, parseInt(e.target.value,10)||20); saveState(); render(); };
+  document.getElementById("outputStep").oninput = (e)=>{ state.outputStep = Math.max(1, parseInt(e.target.value,10)||20); saveState(); render(); };
+  document.getElementById("dsSpiral").oninput = (e)=>{ state.dsSpiral = Math.max(0.001, parseFloat(e.target.value)||0.5); saveState(); render(); };
+  document.getElementById("clothoidMode").onchange = (e)=>{ state.clothoidMode = e.target.value; saveState(); render(); };
+
+  // tabs
+  document.getElementById("tabPlan").onclick = ()=>{ state.activeTab="plan"; saveState(); render(); };
+  document.getElementById("tabOutput").onclick = ()=>{ state.activeTab="output"; saveState(); render(); };
+  document.getElementById("tabSave").onclick = ()=>{ state.activeTab="save"; saveState(); render(); };
+
+  // BP/EP
+  document.getElementById("bpN").value = state.bp.N;
+  document.getElementById("bpE").value = state.bp.E;
+  document.getElementById("epN").value = state.ep.N;
+  document.getElementById("epE").value = state.ep.E;
+  document.getElementById("bpN").oninput = (e)=>{ state.bp.N = parseFloat(e.target.value)||0; saveState(); render(); };
+  document.getElementById("bpE").oninput = (e)=>{ state.bp.E = parseFloat(e.target.value)||0; saveState(); render(); };
+  document.getElementById("epN").oninput = (e)=>{ state.ep.N = parseFloat(e.target.value)||0; saveState(); render(); };
+  document.getElementById("epE").oninput = (e)=>{ state.ep.E = parseFloat(e.target.value)||0; saveState(); render(); };
+
+  // use IP count
+  const useIp = document.getElementById("useIpCount");
+  useIp.value = Math.max(0, Math.min(state.useIpCount, state.ipPoints.length));
+  document.getElementById("useIpLabel").textContent = `${useIp.value} / ${state.ipPoints.length}`;
+  useIp.oninput = (e)=>{ state.useIpCount = parseInt(e.target.value,10)||0; saveState(); render(); };
+
+  // add IP / reset / delete
+  document.getElementById("addIP").onclick = ()=>{
+    const newId = Math.max(0, ...state.ipPoints.map(p=>p.id)) + 1;
+    state.ipPoints.push({ id:newId, name:`IP${newId}`, N:0, E:0 });
+    state.useIpCount = Math.min(state.ipPoints.length, state.useIpCount + 1);
+    saveState(); render();
+  };
+  document.getElementById("resetDemo").onclick = ()=>{
+    state.projectName="テスト案件";
+    state.coordDecimals=3;
+    state.staPitch=20;
+    state.outputStep=20;
+    state.dsSpiral=0.5;
+    state.clothoidMode="A";
+    state.bp={name:"BP",N:0,E:0};
+    state.ep={name:"EP",N:0,E:500};
+    state.ipPoints=[
+      { id: 1, name:"IP1", N:0, E:0 },
+      { id: 2, name:"IP2", N:0, E:200 },
+      { id: 3, name:"IP3", N:150, E:350 },
+    ];
+    state.useIpCount=3;
+    state.curveSettings=[{ id:1, ipName:"IP2", R:200, A1:100, A2:100, Ls:40, direction:"auto" }];
+    state.extraStations=[];
+    state.nextExtraId=1;
+    saveState(); render();
+  };
+  document.getElementById("delIP").onclick = ()=>{
+    const sel = document.getElementById("delIpSel").value;
+    if (!sel) return;
+    const id = parseInt(sel,10);
+    const delName = state.ipPoints.find(p=>p.id===id)?.name;
+    state.ipPoints = state.ipPoints.filter(p=>p.id!==id);
+    state.useIpCount = Math.min(state.useIpCount, state.ipPoints.length);
+    // curveSettingsの対象IPが消えたら除外
+    const names = new Set(state.ipPoints.map(p=>p.name));
+    state.curveSettings = state.curveSettings.filter(c=>names.has(c.ipName));
+    // 削除したIP名が曲線設定に残ってたら消す
+    if (delName) state.curveSettings = state.curveSettings.filter(c=>c.ipName!==delName);
+    saveState(); render();
+  };
+
+  // IP table bindings
+  viewPlan.querySelectorAll("input[data-ip-name]").forEach(inp=>{
+    const id = parseInt(inp.getAttribute("data-ip-name"),10);
+    inp.oninput = (e)=>{
+      const p = state.ipPoints.find(x=>x.id===id);
+      if (p) p.name = e.target.value || p.name;
+      // 曲線のipName候補更新のため再描画
+      saveState(); render();
+    };
+  });
+  viewPlan.querySelectorAll("input[data-ip-n]").forEach(inp=>{
+    const id = parseInt(inp.getAttribute("data-ip-n"),10);
+    inp.oninput = (e)=>{
+      const p = state.ipPoints.find(x=>x.id===id);
+      if (p) p.N = parseFloat(e.target.value)||0;
+      saveState(); render();
+    };
+  });
+  viewPlan.querySelectorAll("input[data-ip-e]").forEach(inp=>{
+    const id = parseInt(inp.getAttribute("data-ip-e"),10);
+    inp.oninput = (e)=>{
+      const p = state.ipPoints.find(x=>x.id===id);
+      if (p) p.E = parseFloat(e.target.value)||0;
+      saveState(); render();
+    };
+  });
+
+  // curve settings add
+  document.getElementById("addCurve").onclick = ()=>{
+    if (!state.ipPoints.length) return;
+    const newId = Math.max(0, ...state.curveSettings.map(c=>c.id)) + 1;
+    const defaultIP = state.ipPoints[Math.min(1, state.ipPoints.length-1)]?.name || state.ipPoints[0].name;
+    state.curveSettings.push({ id:newId, ipName:defaultIP, R:200, A1:100, A2:100, Ls:40, direction:"auto" });
+    saveState(); render();
+  };
+
+  // curve settings bindings
+  viewPlan.querySelectorAll("select[data-c-ip]").forEach(sel=>{
+    const id = parseInt(sel.getAttribute("data-c-ip"),10);
+    sel.onchange = (e)=>{
+      const c = state.curveSettings.find(x=>x.id===id);
+      if (c) c.ipName = e.target.value;
+      saveState(); render();
+    };
+  });
+  viewPlan.querySelectorAll("select[data-c-dir]").forEach(sel=>{
+    const id = parseInt(sel.getAttribute("data-c-dir"),10);
+    sel.onchange = (e)=>{
+      const c = state.curveSettings.find(x=>x.id===id);
+      if (c) c.direction = e.target.value;
+      saveState(); render();
+    };
+  });
+  const bindNum = (attr, key)=>{
+    viewPlan.querySelectorAll(`input[${attr}]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute(attr),10);
+      inp.oninput = (e)=>{
+        const c = state.curveSettings.find(x=>x.id===id);
+        if (c) c[key] = parseFloat(e.target.value)||0;
+        saveState(); render();
+      };
+    });
+  };
+  bindNum("data-c-r","R");
+  bindNum("data-c-a1","A1");
+  bindNum("data-c-a2","A2");
+  bindNum("data-c-ls","Ls");
+
+  viewPlan.querySelectorAll("button[data-c-del]").forEach(btn=>{
+    const id = parseInt(btn.getAttribute("data-c-del"),10);
+    btn.onclick = ()=>{
+      state.curveSettings = state.curveSettings.filter(c=>c.id!==id);
+      saveState(); render();
+    };
+  });
+
+  // plot options + draw
+  document.getElementById("plotStep").value = state.plotStep;
+  document.getElementById("showKeypoints").checked = !!state.showKeypoints;
+  document.getElementById("showArrow").checked = !!state.showArrow;
+  document.getElementById("plotStep").oninput = (e)=>{ state.plotStep = Math.max(0.1, parseFloat(e.target.value)||5); saveState(); render(); };
+  document.getElementById("showKeypoints").onchange = (e)=>{ state.showKeypoints = !!e.target.checked; saveState(); render(); };
+  document.getElementById("showArrow").onchange = (e)=>{ state.showArrow = !!e.target.checked; saveState(); render(); };
+
+  const canvas = document.getElementById("planCanvas");
+  drawPlanCanvas(canvas, res.segments, workPoints, res.keypoints, {
+    plotStep: state.plotStep,
+    showKeypoints: state.showKeypoints,
+    showArrow: state.showArrow
+  });
+
+  // ---------------- OUTPUT VIEW ----------------
+  const pitch = Math.max(1, Math.floor(state.staPitch||1));
+  const stepInt = Math.max(1, Math.floor(state.outputStep||1));
+
+  const extraMList = state.extraStations.map(x=>x.m);
+  const stBuild = buildStationList(res.total, stepInt, extraMList);
+
+  viewOutput.innerHTML = `
+    <div class="card">
+      <h2>測点（ピッチ表示 + 自由測点）</h2>
+      <div class="grid grid-3">
+        <div class="mini">
+          <b>総延長</b>：${res.total.toFixed(3)} m<br/>
+          <b>測点表示ピッチ</b>：${pitch} m / <b>出力間隔</b>：${stepInt} m
+        </div>
+        <div>
+          <label>自由測点 追加（複数可）</label>
+          <textarea id="extraTokens" placeholder="例：101.527 / 101.527m / 5+1.527 / 0+50.000 など&#10;区切り：空白/カンマ/改行"></textarea>
+        </div>
+        <div>
+          <button class="btn" id="addExtras">＋ 追加</button>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ghost" id="clearExtras">自由測点を全クリア</button>
+        </div>
+      </div>
+      <div class="mini" style="margin-top:8px;">自由測点は「追加距離(m)」か「測点(k+rem)」で入力OK。範囲外は出力から除外。</div>
+      ${stBuild.notes.map(n=>`<div class="warn">⚠ ${n}</div>`).join("")}
+    </div>
+
+    <div class="card">
+      <h2>自由測点リスト</h2>
+      ${state.extraStations.length ? `
+      <div style="overflow:auto;">
+        <table>
+          <thead><tr><th>ID</th><th>測点表示</th><th>追加距離(m)</th><th class="right">削除</th></tr></thead>
+          <tbody>
+            ${state.extraStations.map(x=>`
+              <tr>
+                <td>${x.id}</td>
+                <td>${metersToStaPitch(x.m, pitch, 3)}</td>
+                <td><input data-ex-m="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
+                <td class="right"><button class="btn btn-ghost" data-ex-del="${x.id}">削除</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>` : `<div class="mini">（まだ自由測点はありません）</div>`}
+    </div>
+
+    <div class="card">
+      <h2>中心線CSV出力</h2>
+      <div class="grid grid-3">
+        <div class="mini">
+          出力点数：<b>${stBuild.stations.length}</b> 点<br/>
+          座標小数桁：<b>${d}</b> 桁<br/>
+          測点表示：<b>k+rem</b>（pitch=${pitch}m）
+        </div>
+        <div>
+          <button class="btn btn-ok" id="dlCSV" ${stBuild.stations.length ? "" : "disabled"}>CSVダウンロード</button>
+          <div class="mini" style="margin-top:8px;">ファイル名：${state.projectName}_中心線.csv</div>
+        </div>
+        <div class="mini">
+          ※縦断（GL）は次ステップで追加予定。<br/>
+          現状は平面（N/E/Az）中心。
+        </div>
+      </div>
+
+      <div style="overflow:auto; max-height:420px; margin-top:10px;">
+        <table>
+          <thead><tr><th>測点</th><th>追加距離(m)</th><th>N</th><th>E</th><th>Az</th></tr></thead>
+          <tbody>
+            ${stBuild.stations.slice(0,40).map(s=>{
+              const p = evalAlignment(res.segments, s);
+              return `
+                <tr>
+                  <td>${metersToStaPitch(s, pitch, 3)}</td>
+                  <td>${s.toFixed(3)}</td>
+                  <td>${p.N.toFixed(d)}</td>
+                  <td>${p.E.toFixed(d)}</td>
+                  <td>${p.az.toFixed(3)}</td>
+                </tr>`;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+      <div class="mini" style="margin-top:8px;">※プレビューは先頭40点のみ</div>
+    </div>
+  `;
+
+  // ---------------- SAVE VIEW ----------------
+  viewSave.innerHTML = `
+    <div class="card">
+      <h2>保存（iPad内 自動保存 + JSON）</h2>
+      <div class="grid grid-3">
+        <div class="mini">
+          <b>自動保存</b>：このiPadのlocalStorageに常時保存中。<br/>
+          Safariのタブが落ちても復元しやすいです。<br/>
+          ただし、端末ストレージ整理で消える可能性はゼロではないので、節目でJSON保存がおすすめ。
+        </div>
+        <div>
+          <button class="btn btn-ok" id="saveJSON">JSONを書き出し（バックアップ）</button>
+          <div style="height:10px;"></div>
+          <input id="loadJSON" type="file" accept="application/json" />
+        </div>
+        <div>
+          <button class="btn btn-ghost" id="clearLocal">iPad内保存を削除（注意）</button>
+          <div class="mini" style="margin-top:8px;">※削除すると復元できません</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // bind output actions
+  const addExtrasBtn = document.getElementById("addExtras");
+  if (addExtrasBtn) {
+    addExtrasBtn.onclick = ()=>{
+      const ta = document.getElementById("extraTokens");
+      const txt = (ta.value || "").trim();
+      if (!txt) return;
+      const parts = txt.split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
+      const added = [];
+      const errs = [];
+      for (const tok of parts) {
+        try {
+          const mv = parseTokenToM(tok, pitch);
+          state.extraStations.push({ id: state.nextExtraId++, m: mv });
+          added.push(tok);
+        } catch(e) {
+          errs.push(`${tok}: ${e.message || e}`);
+        }
+      }
+      ta.value = "";
+      saveState();
+      if (errs.length) alert("追加エラー:\n" + errs.join("\n"));
+      render();
+    };
+  }
+
+  const clearExtrasBtn = document.getElementById("clearExtras");
+  if (clearExtrasBtn) {
+    clearExtrasBtn.onclick = ()=>{
+      state.extraStations = [];
+      saveState(); render();
+    };
+  }
+
+  viewOutput.querySelectorAll("input[data-ex-m]").forEach(inp=>{
+    const id = parseInt(inp.getAttribute("data-ex-m"),10);
+    inp.oninput = (e)=>{
+      const row = state.extraStations.find(x=>x.id===id);
+      if (row) row.m = parseFloat(e.target.value)||0;
+      saveState(); render();
+    };
+  });
+
+  viewOutput.querySelectorAll("button[data-ex-del]").forEach(btn=>{
+    const id = parseInt(btn.getAttribute("data-ex-del"),10);
+    btn.onclick = ()=>{
+      state.extraStations = state.extraStations.filter(x=>x.id!==id);
+      saveState(); render();
+    };
+  });
+
+  const dl = document.getElementById("dlCSV");
+  if (dl) {
+    dl.onclick = ()=>{
+      const { stations } = buildStationList(res.total, stepInt, state.extraStations.map(x=>x.m));
+      const rows = stations.map(s=>{
+        const p = evalAlignment(res.segments, s);
+        return {
+          "測点": metersToStaPitch(s, pitch, 3),
+          "追加距離(m)": s.toFixed(3),
+          "北座標N(m)": p.N.toFixed(d),
+          "東座標E(m)": p.E.toFixed(d),
+          "方位角(deg)": p.az.toFixed(3),
+        };
+      });
+      downloadCSV(rows, `${state.projectName}_中心線.csv`);
+    };
+  }
+
+  // bind save view actions
+  const saveBtn = document.getElementById("saveJSON");
+  if (saveBtn) {
+    saveBtn.onclick = ()=>{
+      const blob = JSON.stringify(state, null, 2);
+      const name = `${state.projectName}_backup.json`;
+      downloadText(blob, name, "application/json;charset=utf-8");
+    };
+  }
+  const loadInput = document.getElementById("loadJSON");
+  if (loadInput) {
+    loadInput.onchange = async (e)=>{
+      const f = e.target.files?.[0];
+      if (!f) return;
+      try {
+        const txt = await f.text();
+        const obj = JSON.parse(txt);
+        if (!obj || typeof obj !== "object") throw new Error("JSONが不正");
+        state = Object.assign(state, obj);
+        saveState();
+        render();
+        alert("読み込み完了");
+      } catch(err) {
+        alert("読み込み失敗: " + (err.message || err));
+      } finally {
+        e.target.value = "";
+      }
+    };
+  }
+  const clearLocalBtn = document.getElementById("clearLocal");
+  if (clearLocalBtn) {
+    clearLocalBtn.onclick = ()=>{
+      if (!confirm("iPad内保存を削除します。よろしい？")) return;
+      try { localStorage.removeItem(LS_KEY); } catch(e) {}
+      alert("削除しました（次回起動は初期値）");
+    };
+  }
+
+  // 最後に自動保存
+  saveState();
+};
+
+// initial
+document.getElementById("tabPlan").onclick = ()=>{ state.activeTab="plan"; saveState(); render(); };
+document.getElementById("tabOutput").onclick = ()=>{ state.activeTab="output"; saveState(); render(); };
+document.getElementById("tabSave").onclick = ()=>{ state.activeTab="save"; saveState(); render(); };
+render();
+</script>
+</body>
+</html>
