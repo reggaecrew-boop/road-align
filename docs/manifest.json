@@ -1,1 +1,10 @@
+{
+  "name": "道路線形計算（オフラインPWA）",
+  "short_name": "線形PWA",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f2f6ff",
+  "theme_color": "#2563eb"
+}
 
