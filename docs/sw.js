@@ -1,15 +1,8 @@
-// docs/sw.js
-const CACHE_NAME = "road-align-pwa-v1";
-const CORE = [
-  "./",
-  "./index.html",
-  "./manifest.json",
-];
+const CACHE_NAME = "road-align-v3";
+const ASSETS = ["./", "./index.html", "./manifest.json", "./sw.js"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(CORE))
-  );
+  event.waitUntil(caches.open(CACHE_NAME).then((c) => c.addAll(ASSETS)));
   self.skipWaiting();
 });
 
@@ -23,33 +16,24 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-// ネット優先→ダメならキャッシュ（HTMLはオフラインでも開けるように）
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   const url = new URL(req.url);
-
-  // 同一オリジンだけ扱う
   if (url.origin !== self.location.origin) return;
 
-  // ナビゲーション(ページ遷移)は index.html を返してPWAを保つ
   if (req.mode === "navigate") {
     event.respondWith(
       (async () => {
         try {
-          const fresh = await fetch(req);
-          const cache = await caches.open(CACHE_NAME);
-          cache.put("./", fresh.clone());
-          return fresh;
+          return await fetch(req);
         } catch {
-          const cached = await caches.match("./");
-          return cached || caches.match("./index.html");
+          return (await caches.match("./")) || (await caches.match("./index.html"));
         }
       })()
     );
     return;
   }
 
-  // それ以外はネット→キャッシュ
   event.respondWith(
     (async () => {
       try {
