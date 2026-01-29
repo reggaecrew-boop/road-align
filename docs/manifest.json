@@ -1,6 +1,6 @@
 {
-  "name": "道路線形計算（オフラインPWA）",
-  "short_name": "線形PWA",
+  "name": "道路線形計算（iPadオフラインPWA）",
+  "short_name": "道路線形",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
