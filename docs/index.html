@@ -132,6 +132,7 @@
     <div class="tabs">
       <button class="tab" data-jump="secPlan">平面</button>
       <button class="tab" data-jump="secProfile">縦断</button>
+      <button class="tab" data-jump="secCross">横断</button>
       <button class="tab" data-jump="secOutput">出力</button>
       <button class="tab" data-jump="secSave">保存</button>
     </div>
@@ -139,6 +140,7 @@
 
   <div id="viewPlan"></div>
   <div id="viewProfile"></div>
+  <div id="viewCross"></div>
   <div id="viewOutput"></div>
   <div id="viewSave"></div>
 
@@ -149,7 +151,10 @@
 /* =========================
    State + autosave (iPad)
 ========================= */
-const LS_KEY = "road_align_pwa_state_v2_profile";
+const LS_KEY_NEW = "road_align_pwa_state_v3_unified";
+const LS_KEY_OLD = "road_align_pwa_state_v2_profile";
+const LS_KEY = LS_KEY_NEW;
+
 let state = {
   projectName: "テスト案件",
   coordDecimals: 3,
@@ -172,44 +177,151 @@ let state = {
     { id: 1, ipName: "IP2", R: 200, A1: 100, A2: 100, Ls: 40, direction: "auto" }
   ],
 
-  extraStations: [],
-  nextExtraId: 1,
+  // 追加測点（タブ別）
+  extraStations: {
+    plan: [],
+    profile: [],
+    cross: [],
+    output: [],
+  },
+  nextExtraId: {
+    plan: 1,
+    profile: 1,
+    cross: 1,
+    output: 1,
+  },
 
   plotStep: 5.0,
   showKeypoints: true,
   showArrow: false,
 
-  // ===== 縦断（勾配区間＋縦断曲線） =====
+  // ===== 縦断（勾配区間 + 縦断曲線(VPI単位)） =====
   profile: {
     enabled: true,
     startSta: 0.000,
     startZ: 0.000,
-    rows: [
-      { id: 1, nextSta: 100.000, gradePct:  2.534, vcL: 80.000, vcYmax: null },
-      { id: 2, nextSta: 300.000, gradePct: -1.000, vcL: null,   vcYmax: 0.145 },
-      { id: 3, nextSta: 500.000, gradePct:  0.500, vcL: null,   vcYmax: null }
+    grades: [
+      { id: 1, nextSta: 100.000, gradePct:  2.534 },
+      { id: 2, nextSta: 300.000, gradePct: -1.000 },
+      { id: 3, nextSta: 500.000, gradePct:  0.500 }
     ],
-    nextRowId: 4
+    nextGradeId: 4,
+
+    // VPIごと（PVの中間点）に縦断曲線を紐付け
+    // L優先。Lが空なら ymax から L=8*ymax/|A| に換算
+    vcurves: [
+      { id: 1, vpiSta: 100.000, L: 80.000, ymax: null },
+      { id: 2, vpiSta: 300.000, L: null,   ymax: 0.145 }
+    ],
+    nextVcurveId: 3,
   }
 };
 
 function saveState() {
   try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch(e) {}
 }
+function normalizeState(s) {
+  // --- extraStations ---
+  if (Array.isArray(s.extraStations)) {
+    // 旧: extraStations:[] / nextExtraId:number を output に移す
+    const old = s.extraStations;
+    const oldNext = Number.isFinite(s.nextExtraId)
+      ? s.nextExtraId
+      : (Math.max(0, ...old.map(r => r.id || 0)) + 1);
+    s.extraStations = { plan: [], profile: [], cross: [], output: old };
+    s.nextExtraId = { plan: 1, profile: 1, cross: 1, output: oldNext };
+  } else {
+    s.extraStations = Object.assign({ plan: [], profile: [], cross: [], output: [] }, s.extraStations || {});
+    for (const k of ["plan", "profile", "cross", "output"]) {
+      if (!Array.isArray(s.extraStations[k])) s.extraStations[k] = [];
+    }
+    if (!s.nextExtraId || typeof s.nextExtraId !== "object" || Array.isArray(s.nextExtraId)) {
+      s.nextExtraId = { plan: 1, profile: 1, cross: 1, output: 1 };
+    }
+    s.nextExtraId = Object.assign({ plan: 1, profile: 1, cross: 1, output: 1 }, s.nextExtraId);
+  }
+
+  // --- profile ---
+  s.profile = Object.assign({
+    enabled: true,
+    startSta: 0,
+    startZ: 0,
+    grades: [],
+    nextGradeId: 1,
+    vcurves: [],
+    nextVcurveId: 1,
+  }, s.profile || {});
+
+  // 旧: rows/nextRowId -> grades/vcurves
+  if (Array.isArray(s.profile.rows)) {
+    const rows = (s.profile.rows || [])
+      .filter(r => Number.isFinite(r.nextSta) && Number.isFinite(r.gradePct))
+      .slice()
+      .sort((a, b) => Number(a.nextSta) - Number(b.nextSta));
+
+    s.profile.grades = rows.map((r, idx) => ({
+      id: Number.isFinite(r.id) ? r.id : (idx + 1),
+      nextSta: Number(r.nextSta) || 0,
+      gradePct: Number(r.gradePct) || 0,
+    }));
+
+    s.profile.nextGradeId = Number.isFinite(s.profile.nextRowId)
+      ? s.profile.nextRowId
+      : (Math.max(0, ...s.profile.grades.map(r => r.id || 0)) + 1);
+
+    const vc = [];
+    for (let i = 0; i < rows.length - 1; i++) {
+      const r = rows[i];
+      const L = (r.vcL == null || r.vcL === "") ? null : Number(r.vcL);
+      const ymax = (r.vcYmax == null || r.vcYmax === "") ? null : Number(r.vcYmax);
+      const hasL = Number.isFinite(L) && L > 0;
+      const hasY = Number.isFinite(ymax) && ymax > 0;
+      if (!hasL && !hasY) continue;
+      vc.push({
+        id: vc.length + 1,
+        vpiSta: Number(r.nextSta) || 0,
+        L: hasL ? L : null,
+        ymax: hasY ? ymax : null,
+      });
+    }
+    s.profile.vcurves = vc;
+    s.profile.nextVcurveId = vc.length + 1;
+
+    delete s.profile.rows;
+    delete s.profile.nextRowId;
+  }
+
+  s.profile.grades = Array.isArray(s.profile.grades) ? s.profile.grades : [];
+  s.profile.vcurves = Array.isArray(s.profile.vcurves) ? s.profile.vcurves : [];
+
+  s.profile.nextGradeId = Number.isFinite(s.profile.nextGradeId)
+    ? s.profile.nextGradeId
+    : (Math.max(0, ...s.profile.grades.map(r => r.id || 0)) + 1);
+
+  s.profile.nextVcurveId = Number.isFinite(s.profile.nextVcurveId)
+    ? s.profile.nextVcurveId
+    : (Math.max(0, ...s.profile.vcurves.map(r => r.id || 0)) + 1);
+
+  return s;
+}
+
 function loadState() {
-  const t = localStorage.getItem(LS_KEY);
+  const tNew = localStorage.getItem(LS_KEY_NEW);
+  const tOld = localStorage.getItem(LS_KEY_OLD);
+  const t = tNew || tOld;
   if (!t) return;
   try {
     const obj = JSON.parse(t);
-    if (obj && typeof obj === "object") state = Object.assign(state, obj);
-    state.profile = Object.assign({
-      enabled: true, startSta: 0, startZ: 0, rows: [], nextRowId: 1
-    }, state.profile || {});
-    state.profile.rows = Array.isArray(state.profile.rows) ? state.profile.rows : [];
-    state.profile.nextRowId = Number.isFinite(state.profile.nextRowId)
-      ? state.profile.nextRowId
-      : (Math.max(0, ...state.profile.rows.map(r=>r.id||0))+1);
-  } catch(e) {}
+    if (obj && typeof obj === "object") {
+      state = Object.assign(state, obj);
+      state = normalizeState(state);
+
+      // 旧キーから読み込んだ場合は新キーにも書き戻す
+      if (!tNew && tOld) {
+        try { localStorage.setItem(LS_KEY_NEW, JSON.stringify(state)); } catch (e) {}
+      }
+    }
+  } catch (e) {}
 }
 loadState();
 
@@ -307,73 +419,180 @@ const setOrNull = (v)=> {
   return Number.isFinite(n) ? n : null;
 };
 
+/* ---- 追加測点（タブ別） ---- */
+const EXTRA_GROUPS = ["plan","profile","cross","output"];
+
+const ensureExtraState = ()=> {
+  state.extraStations = state.extraStations || {};
+  state.nextExtraId = state.nextExtraId || {};
+  for (const k of EXTRA_GROUPS) {
+    if (!Array.isArray(state.extraStations[k])) state.extraStations[k] = [];
+    if (!Number.isFinite(state.nextExtraId[k])) {
+      const mx = Math.max(0, ...state.extraStations[k].map(r=>r.id||0));
+      state.nextExtraId[k] = mx + 1;
+    }
+  }
+};
+
+const addExtrasFromText = (groupKey, text, pitch)=> {
+  ensureExtraState();
+  const parts = (String(text||"").trim())
+    .split(/[\s,]+/)
+    .map(s=>s.trim())
+    .filter(Boolean);
+  const errs = [];
+  for (const tok of parts) {
+    try {
+      const mv = parseTokenToM(tok, pitch);
+      state.extraStations[groupKey].push({ id: state.nextExtraId[groupKey]++, m: mv });
+    } catch(e) {
+      errs.push(`${tok}: ${e.message || e}`);
+    }
+  }
+  return errs;
+};
+
+const bindExtraUI = (groupKey, rootEl, pitch)=> {
+  ensureExtraState();
+  const addBtn = document.getElementById(`addExtras_${groupKey}`);
+  const ta = document.getElementById(`extraTokens_${groupKey}`);
+  const clearBtn = document.getElementById(`clearExtras_${groupKey}`);
+
+  if (addBtn && ta) {
+    addBtn.onclick = ()=> {
+      const txt = (ta.value||"").trim();
+      if (!txt) return;
+      const errs = addExtrasFromText(groupKey, txt, pitch);
+      ta.value = "";
+      saveState();
+      if (errs.length) alert("追加エラー:\n" + errs.join("\n"));
+      render();
+    };
+  }
+  if (clearBtn) {
+    clearBtn.onclick = ()=> {
+      state.extraStations[groupKey] = [];
+      state.nextExtraId[groupKey] = 1;
+      saveState();
+      render();
+    };
+  }
+
+  if (!rootEl) return;
+  rootEl.querySelectorAll(`input[data-ex-group="${groupKey}"][data-ex-id]`).forEach(inp=>{
+    const id = parseInt(inp.getAttribute("data-ex-id"),10);
+    inp.oninput = (e)=>{
+      const row = state.extraStations[groupKey].find(x=>x.id===id);
+      if (row) row.m = parseFloat(e.target.value)||0;
+      saveState();
+      render();
+    };
+  });
+  rootEl.querySelectorAll(`button[data-ex-del][data-ex-group="${groupKey}"]`).forEach(btn=>{
+    const id = parseInt(btn.getAttribute("data-ex-del"),10);
+    btn.onclick = ()=>{
+      state.extraStations[groupKey] = state.extraStations[groupKey].filter(x=>x.id!==id);
+      saveState();
+      render();
+    };
+  });
+};
+
+
 /* =========================
    Profile (Vertical)
 ========================= */
-const toDecGrade = (pct) => (Number(pct)||0) / 100.0;
+const toDecGrade = (pct) => (Number(pct) || 0) / 100.0;
 
 const buildProfileModel = (prof, totalPlan) => {
   const warnings = [];
-  if (!prof?.enabled) return { ok:false, pv:[], segments:[], curves:[], warnings };
+  if (!prof?.enabled) return { ok: false, pv: [], segments: [], curves: [], warnings };
 
-  const rows = (prof.rows || [])
+  const grades = (prof.grades || [])
     .filter(r => Number.isFinite(r.nextSta) && Number.isFinite(r.gradePct))
     .slice()
-    .sort((a,b)=>a.nextSta-b.nextSta);
+    .sort((a, b) => Number(a.nextSta) - Number(b.nextSta));
 
   const s0 = Number(prof.startSta) || 0;
   const z0 = Number(prof.startZ) || 0;
 
-  const pv = [{ sta:s0, z:z0 }];
-
+  const pv = [{ sta: s0, z: z0 }];
   let curSta = s0, curZ = z0;
-  for (const r of rows) {
+
+  for (const r of grades) {
     const s1 = Number(r.nextSta);
-    const g  = toDecGrade(Number(r.gradePct));
-    if (!(s1 > curSta)) { warnings.push(`縦断: nextStaが増加していません（${s1.toFixed(3)}）`); continue; }
+    const g = toDecGrade(Number(r.gradePct));
+    if (!(s1 > curSta)) {
+      warnings.push(`縦断: nextStaが増加していません（${s1.toFixed(3)}）`);
+      continue;
+    }
     curZ = curZ + g * (s1 - curSta);
     curSta = s1;
     pv.push({ sta: curSta, z: curZ });
   }
 
   if (Number.isFinite(totalPlan) && pv.length >= 2) {
-    const lastSta = pv[pv.length-1].sta;
+    const lastSta = pv[pv.length - 1].sta;
     if (totalPlan > lastSta + 1e-6) {
-      const lastRow = rows[rows.length-1];
-      const gLast = toDecGrade(Number(lastRow.gradePct));
-      const zEnd = pv[pv.length-1].z + gLast * (totalPlan - lastSta);
+      const lastGrade = grades.length ? grades[grades.length - 1] : { gradePct: 0 };
+      const gLast = toDecGrade(Number(lastGrade.gradePct));
+      const zEnd = pv[pv.length - 1].z + gLast * (totalPlan - lastSta);
       pv.push({ sta: totalPlan, z: zEnd });
       warnings.push(`縦断: 終点測点が平面総延長(${totalPlan.toFixed(3)})に届かないため、最後勾配で延長しました`);
+    } else if (totalPlan < lastSta - 1e-6) {
+      warnings.push(`縦断: 勾配終点(${lastSta.toFixed(3)})が平面総延長(${totalPlan.toFixed(3)})を超えています（出力は平面総延長まで）`);
     }
   }
 
+  // segments: pv[i] -> pv[i+1] は grades[i] の勾配
   const segments = [];
-  for (let i=0; i<pv.length-1; i++) {
-    const staA = pv[i].sta, staB = pv[i+1].sta;
-    const srcRow = rows[Math.min(i, rows.length-1)];
-    const gPct = Number(srcRow?.gradePct ?? 0);
+  for (let i = 0; i < pv.length - 1; i++) {
+    const staA = pv[i].sta, staB = pv[i + 1].sta;
+    const src = grades[i] || grades[grades.length - 1] || { gradePct: 0 };
+    const gPct = Number(src.gradePct ?? 0);
     segments.push({ s0: staA, s1: staB, z0: pv[i].z, gDec: toDecGrade(gPct) });
   }
 
+  // VPI曲線（VPI単位）
   const curves = [];
-  for (let i=1; i<pv.length-1; i++) {
+  const pvKeys = new Set([...(pv.slice(1, -1).map(p => p.sta.toFixed(3)))]);
+
+  // 重複チェック（同一VPIに複数）
+  const vcMap = new Map();
+  for (const vc of (prof.vcurves || [])) {
+    const vpiSta = Number(vc.vpiSta);
+    if (!Number.isFinite(vpiSta)) continue;
+    const key = vpiSta.toFixed(3);
+    if (vcMap.has(key)) warnings.push(`縦断: VPI@${key} に縦断曲線が重複しています（最後の設定を使用）`);
+    vcMap.set(key, vc);
+  }
+
+  // PVに存在しないVPI指定
+  for (const key of vcMap.keys()) {
+    if (!pvKeys.has(key)) warnings.push(`縦断: 縦断曲線のVPI測点(${key})がPV点に存在しません（スキップ）`);
+  }
+
+  for (let i = 1; i < pv.length - 1; i++) {
     const vpiSta = pv[i].sta;
-    const prevSeg = segments[i-1];
+    const key = vpiSta.toFixed(3);
+    const spec = vcMap.get(key);
+    if (!spec) continue;
+
+    const prevSeg = segments[i - 1];
     const nextSeg = segments[i];
     if (!prevSeg || !nextSeg) continue;
 
     const g1 = prevSeg.gDec;
     const g2 = nextSeg.gDec;
-    const A  = g2 - g1;
+    const A = g2 - g1;
 
-    const srcRow = rows[i-1];
-    let L = Number(srcRow?.vcL);
-    const ymax = (srcRow?.vcYmax==null ? NaN : Number(srcRow?.vcYmax));
+    let L = Number(spec.L);
+    const ymax = (spec.ymax == null ? NaN : Number(spec.ymax));
 
     if (!Number.isFinite(L) || L <= 0) {
       if (Number.isFinite(ymax) && ymax > 0) {
         if (Math.abs(A) < 1e-12) {
-          warnings.push(`縦断: VPI@${vpiSta.toFixed(3)} で勾配差0のため ymax→L換算できません`);
+          warnings.push(`縦断: VPI@${key} で勾配差0のため ymax→L換算できません`);
           continue;
         }
         L = 8 * ymax / Math.abs(A);
@@ -385,27 +604,28 @@ const buildProfileModel = (prof, totalPlan) => {
     if (Number.isFinite(ymax) && ymax > 0 && Number.isFinite(L) && L > 0 && Math.abs(A) > 1e-12) {
       const ycalc = Math.abs(A) * L / 8;
       if (Math.abs(ycalc - ymax) > 0.005) {
-        warnings.push(`縦断: VPI@${vpiSta.toFixed(3)} のymax不一致（入力=${ymax.toFixed(3)} / 計算=${ycalc.toFixed(3)}）`);
+        warnings.push(`縦断: VPI@${key} のymax不一致（入力=${ymax.toFixed(3)} / 計算=${ycalc.toFixed(3)}）`);
       }
     }
 
+    // 前後区間をはみ出さない最大L
     const maxL = 2 * Math.min(vpiSta - prevSeg.s0, nextSeg.s1 - vpiSta);
     if (maxL <= 0) continue;
     if (L > maxL) {
-      warnings.push(`縦断: VPI@${vpiSta.toFixed(3)} のL(${L.toFixed(3)})が長すぎるため、最大(${maxL.toFixed(3)})に縮めました`);
+      warnings.push(`縦断: VPI@${key} のL(${L.toFixed(3)})が長すぎるため、最大(${maxL.toFixed(3)})に縮めました`);
       L = maxL;
     }
 
-    const bvc = vpiSta - L/2;
-    const evc = vpiSta + L/2;
+    const bvc = vpiSta - L / 2;
+    const evc = vpiSta + L / 2;
 
     const zVPI = pv[i].z;
-    const zBVC = zVPI - g1 * (L/2);
+    const zBVC = zVPI - g1 * (L / 2);
 
-    curves.push({ s0:bvc, s1:evc, L, zBVC, g1, A });
+    curves.push({ s0: bvc, s1: evc, L, zBVC, g1, A });
   }
 
-  return { ok:true, pv, segments, curves, warnings };
+  return { ok: true, pv, segments, curves, warnings };
 };
 
 const evalProfileZ = (model, s) => {
@@ -414,7 +634,7 @@ const evalProfileZ = (model, s) => {
   for (const c of model.curves) {
     if (s >= c.s0 - 1e-9 && s <= c.s1 + 1e-9) {
       const x = clamp(s - c.s0, 0, c.L);
-      return c.zBVC + c.g1 * x + (c.A / (2*c.L)) * x * x;
+      return c.zBVC + c.g1 * x + (c.A / (2 * c.L)) * x * x;
     }
   }
 
@@ -422,7 +642,7 @@ const evalProfileZ = (model, s) => {
   if (!segs.length) return NaN;
 
   if (s <= segs[0].s0) return segs[0].z0;
-  const last = segs[segs.length-1];
+  const last = segs[segs.length - 1];
   if (s >= last.s1) return last.z0 + last.gDec * (last.s1 - last.s0);
 
   for (const seg of segs) {
@@ -432,6 +652,7 @@ const evalProfileZ = (model, s) => {
   }
   return NaN;
 };
+
 
 /* =========================
    Segment classes (Plan)
@@ -704,21 +925,28 @@ const getWorkPoints = () => {
   ]);
 };
 
-const buildStationList = (total, stepInt, extraMList) => {
+const buildUnifiedStationList = (total, stepInt, sources) => {
   stepInt = Math.max(1, Math.floor(stepInt || 1));
+
   const base = [];
   for (let s = 0; s < total - 1e-9; s += stepInt) base.push(s);
   base.push(total);
 
   const extrasIn = [];
   const notes = [];
-  for (const v of extraMList || []) {
-    if (!Number.isFinite(v)) continue;
-    if (v < -1e-9 || v > total + 1e-9) notes.push(`自由測点 ${v.toFixed(3)}m は範囲外なので除外`);
-    else extrasIn.push(clamp(v, 0, total));
+
+  for (const src of sources || []) {
+    const label = src?.label || "追加測点";
+    const values = src?.values || [];
+    for (const v of values) {
+      if (!Number.isFinite(v)) continue;
+      if (v < -1e-9 || v > total + 1e-9) notes.push(`${label} ${v.toFixed(3)}m は範囲外なので除外`);
+      else extrasIn.push(clamp(v, 0, total));
+    }
   }
-  const merged = [...base, ...extrasIn].sort((a,b)=>a-b);
-  return { stations: dedupeSorted(merged), notes };
+
+  const merged = [...base, ...extrasIn].sort((a, b) => a - b);
+  return { stations: dedupeSorted(merged), notes, baseCount: base.length, extraCount: extrasIn.length };
 };
 
 /* =========================
@@ -854,6 +1082,7 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
 ========================= */
 const viewPlan = document.getElementById("viewPlan");
 const viewProfile = document.getElementById("viewProfile");
+const viewCross = document.getElementById("viewCross");
 const viewOutput = document.getElementById("viewOutput");
 const viewSave = document.getElementById("viewSave");
 
@@ -1006,6 +1235,42 @@ const render = () => {
         <canvas id="planCanvas" width="980" height="520"></canvas>
       </div>
       <div class="mini" style="margin-top:8px;">※iPadの回転/画面幅によっては横スクロールで見てね</div>
+    </div>
+
+    <div class="card">
+      <h2>平面：追加測点（出力に統合）</h2>
+      <div class="grid grid-3">
+        <div class="mini">
+          入力：追加距離(m) / k+rem（pitch=${pitch}m）<br/>
+          区切り：空白・カンマ・改行
+        </div>
+        <div>
+          <label>追加測点 追加入力</label>
+          <textarea id="extraTokens_plan" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
+        </div>
+        <div>
+          <button class="btn" id="addExtras_plan">＋ 追加</button>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ghost" id="clearExtras_plan">平面追加を全クリア</button>
+        </div>
+      </div>
+
+      ${state.extraStations.plan.length ? `
+      <div style="overflow:auto; margin-top:10px;">
+        <table>
+          <thead><tr><th>ID</th><th>測点表示</th><th>追加距離(m)</th><th class="right">削除</th></tr></thead>
+          <tbody>
+            ${state.extraStations.plan.map(x=>`
+              <tr>
+                <td>${x.id}</td>
+                <td>${metersToStaPitch(x.m, pitch, 3)}</td>
+                <td><input data-ex-group="plan" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
+                <td class="right"><button class="btn btn-ghost" data-ex-group="plan" data-ex-del="${x.id}">削除</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>` : `<div class="mini" style="margin-top:10px;">（まだ平面の追加測点はありません）</div>`}
     </div>
   `;
 
@@ -1170,191 +1435,424 @@ const render = () => {
     showArrow: state.showArrow
   });
 
-  /* -------- PROFILE -------- */
-  const prof = state.profile || {enabled:false, startSta:0, startZ:0, rows:[], nextRowId:1};
-  const profModel = buildProfileModel(prof, res.total);
 
-  viewProfile.innerHTML = `
-    <div class="card" id="secProfile">
-      <h2>縦断線形（勾配% + 縦断曲線 L / ymax）</h2>
+/* -------- PROFILE -------- */
+const prof = state.profile || {enabled:false, startSta:0, startZ:0, grades:[], nextGradeId:1, vcurves:[], nextVcurveId:1};
+const profModel = buildProfileModel(prof, res.total);
+const pvInternal = (profModel.pv || []).slice(1, -1);
+const pvKeys = new Set(pvInternal.map(p=>p.sta.toFixed(3)));
+const vpiToA = new Map();
+if (profModel.ok) {
+  for (let i=1;i<profModel.pv.length-1;i++) {
+    const key = profModel.pv[i].sta.toFixed(3);
+    const prev = profModel.segments[i-1];
+    const next = profModel.segments[i];
+    const A = (next?.gDec ?? 0) - (prev?.gDec ?? 0);
+    vpiToA.set(key, A);
+  }
+}
 
-      <div class="grid grid-4">
-        <div>
-          <label class="mini"><input id="profEnabled" type="checkbox" /> 縦断を使う（GL出力）</label>
-          <div class="mini">勾配%：小数3桁（例 2.534%） / ymax：小数3桁（例 0.145m）</div>
-        </div>
-        <div>
-          <button class="btn" id="addGradeRow">＋ 行追加</button>
-          <div style="height:10px;"></div>
-          <button class="btn btn-ghost" id="sortGradeRow">測点で整列</button>
-        </div>
-        <div>
-          <button class="btn btn-ok" id="setEndToTotal">終点を平面総延長にセット</button>
-          <div class="mini" style="margin-top:8px;">最後の行（終点）の nextSta を ${res.total.toFixed(3)}m にします</div>
-        </div>
-        <div class="mini">
-          <b>平面総延長</b>：${res.total.toFixed(3)} m<br/>
-          <b>PV点</b>：${profModel.pv.length} / <b>曲線</b>：${profModel.curves.length}<br/>
-          <span class="pill">警告 ${profModel.warnings.length} 件</span>
-        </div>
+viewProfile.innerHTML = `
+  <div class="card" id="secProfile">
+    <h2>縦断線形（勾配区間 + 縦断曲線：VPI単位）</h2>
+
+    <div class="grid grid-4">
+      <div>
+        <label class="mini"><input id="profEnabled" type="checkbox" /> 縦断を使う（GL出力）</label>
+        <div class="mini">勾配%：小数3桁（例 2.534%） / ymax：小数3桁（例 0.145m）</div>
       </div>
-
-      <div class="sep"></div>
-
-      <div class="grid grid-3">
-        <div><label>勾配起点 測点(m)</label><input id="startSta" type="number" step="0.001" value="${Number(prof.startSta||0).toFixed(3)}"/></div>
-        <div><label>勾配起点 標高(m)</label><input id="startZ" type="number" step="0.001" value="${Number(prof.startZ||0).toFixed(3)}"/></div>
-        <div class="mini">
-          終点（最終行）は nextSta を入れてください（通常 ${res.total.toFixed(3)}m）<br/>
-          参考：測点表示（pitch=${pitch}m）: ${metersToStaPitch(res.total, pitch, 3)}
-        </div>
+      <div>
+        <button class="btn" id="addGradeRow">＋ 勾配区間追加</button>
+        <div style="height:10px;"></div>
+        <button class="btn btn-ghost" id="sortGradeRow">測点で整列</button>
       </div>
-
-      <div style="overflow:auto; margin-top:10px;">
-        <table>
-          <thead>
-            <tr>
-              <th>次の測点(m)</th>
-              <th>勾配(%)</th>
-              <th>曲線長 L(m)</th>
-              <th>ymax(m)</th>
-              <th class="right">削除</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${(prof.rows||[]).map(r=>`
-              <tr>
-                <td><input data-nextsta="${r.id}" type="number" step="0.001" value="${Number(r.nextSta??0).toFixed(3)}"/></td>
-                <td><input data-grade="${r.id}" type="number" step="0.001" value="${Number(r.gradePct??0).toFixed(3)}"/></td>
-                <td><input data-vcl="${r.id}" type="number" step="0.001" value="${(r.vcL==null||r.vcL==="")?"":Number(r.vcL).toFixed(3)}" placeholder="例 80.000"/></td>
-                <td><input data-ymax="${r.id}" type="number" step="0.001" value="${(r.vcYmax==null||r.vcYmax==="")?"":Number(r.vcYmax).toFixed(3)}" placeholder="例 0.145"/></td>
-                <td class="right"><button class="btn btn-ghost" data-delgrade="${r.id}">削除</button></td>
-              </tr>
-            `).join("")}
-          </tbody>
-        </table>
+      <div>
+        <button class="btn btn-ok" id="setEndToTotal">終点を平面総延長にセット</button>
+        <div class="mini" style="margin-top:8px;">最後の勾配区間の nextSta を ${res.total.toFixed(3)}m にします</div>
       </div>
-
-      ${profModel.warnings.map(w=>`<div class="warn">⚠ ${w}</div>`).join("")}
-      <div class="mini" style="margin-top:8px;">※縦断曲線は対称（VPIの前後 L/2）。ymax入力時は L=8*ymax/|A| に換算します。</div>
+      <div class="mini">
+        <b>平面総延長</b>：${res.total.toFixed(3)} m<br/>
+        <b>PV点</b>：${profModel.pv.length} / <b>曲線</b>：${profModel.curves.length}<br/>
+        <span class="pill">警告 ${profModel.warnings.length} 件</span>
+      </div>
     </div>
-  `;
 
-  document.getElementById("profEnabled").checked = !!prof.enabled;
-  document.getElementById("profEnabled").onchange = (e)=>{ state.profile.enabled = !!e.target.checked; saveState(); render(); };
-  document.getElementById("startSta").onchange = (e)=>{ state.profile.startSta = parseFloat(e.target.value)||0; saveState(); render(); };
-  document.getElementById("startZ").onchange   = (e)=>{ state.profile.startZ = parseFloat(e.target.value)||0; saveState(); render(); };
+    <div class="sep"></div>
 
-  document.getElementById("addGradeRow").onclick = ()=>{
-    state.profile.rows.push({ id: state.profile.nextRowId++, nextSta: 0.000, gradePct: 0.000, vcL:null, vcYmax:null });
-    saveState(); render();
-  };
-  document.getElementById("sortGradeRow").onclick = ()=>{
-    state.profile.rows.sort((a,b)=> (Number(a.nextSta)||0) - (Number(b.nextSta)||0));
-    saveState(); render();
-  };
-  document.getElementById("setEndToTotal").onclick = ()=>{
-    const total = Number(res.total||0);
-    if (!state.profile.rows.length) {
-      state.profile.rows.push({ id: state.profile.nextRowId++, nextSta: total, gradePct: 0.000, vcL:null, vcYmax:null });
-    } else {
-      let idx = 0;
-      for (let i=1;i<state.profile.rows.length;i++){
-        if ((Number(state.profile.rows[i].nextSta)||0) >= (Number(state.profile.rows[idx].nextSta)||0)) idx = i;
-      }
-      state.profile.rows[idx].nextSta = Number(total.toFixed(3));
+    <div class="grid grid-3">
+      <div><label>勾配起点 測点(m)</label><input id="startSta" type="number" step="0.001" value="${Number(prof.startSta||0).toFixed(3)}"/></div>
+      <div><label>勾配起点 標高(m)</label><input id="startZ" type="number" step="0.001" value="${Number(prof.startZ||0).toFixed(3)}"/></div>
+      <div class="mini">
+        参考：測点表示（pitch=${pitch}m）: ${metersToStaPitch(res.total, pitch, 3)}
+      </div>
+    </div>
+
+    <div style="overflow:auto; margin-top:10px;">
+      <table>
+        <thead>
+          <tr>
+            <th>次の測点(m)</th>
+            <th>勾配(%)</th>
+            <th class="right">削除</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(prof.grades||[]).map(r=>`
+            <tr>
+              <td><input data-g-nextsta="${r.id}" type="number" step="0.001" value="${Number(r.nextSta??0).toFixed(3)}"/></td>
+              <td><input data-g-grade="${r.id}" type="number" step="0.001" value="${Number(r.gradePct??0).toFixed(3)}"/></td>
+              <td class="right"><button class="btn btn-ghost" data-g-del="${r.id}">削除</button></td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+
+    ${profModel.warnings.map(w=>`<div class="warn">⚠ ${w}</div>`).join("")}
+  </div>
+
+  <div class="card">
+    <h2>縦断曲線（VPI単位で管理）</h2>
+    <div class="grid grid-3">
+      <div class="mini">
+        VPIは「PV点（勾配の折点）」から選択。<br/>
+        <b>L優先</b>。Lが空のときは ymax から <b>L=8*ymax/|A|</b> で換算（A=勾配差）。
+      </div>
+      <div>
+        <button class="btn" id="addVcurve">＋ 縦断曲線追加</button>
+        <div style="height:10px;"></div>
+        <button class="btn btn-ghost" id="sortVcurve">VPIで整列</button>
+      </div>
+      <div class="mini">
+        PV候補：${pvInternal.length} 点（内部PVのみ）
+      </div>
+    </div>
+
+    <div style="overflow:auto; margin-top:10px;">
+      <table>
+        <thead>
+          <tr>
+            <th>VPI</th>
+            <th>Δg(%)</th>
+            <th>曲線長 L(m)</th>
+            <th>ymax(m)</th>
+            <th class="right">削除</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${(prof.vcurves||[]).map(r=>{
+            const k = (Number(r.vpiSta)||0).toFixed(3);
+            const A = (vpiToA.get(k) ?? 0) * 100;
+            const extraOpt = pvKeys.has(k) ? "" : `<option value="${k}" selected>（PVに無い） ${k}m</option>`;
+            const opts = pvInternal.map(p=>{
+              const v = p.sta.toFixed(3);
+              const sel = (v===k) ? "selected" : "";
+              return `<option value="${v}" ${sel}>${metersToStaPitch(p.sta, pitch, 3)} (${v}m)</option>`;
+            }).join("");
+            return `
+              <tr>
+                <td>
+                  <select data-vc-vpi="${r.id}">
+                    ${extraOpt}
+                    ${opts}
+                  </select>
+                </td>
+                <td>${A.toFixed(3)}</td>
+                <td><input data-vc-l="${r.id}" type="number" step="0.001" value="${(r.L==null||r.L==="")?"":Number(r.L).toFixed(3)}" placeholder="例 80.000"/></td>
+                <td><input data-vc-y="${r.id}" type="number" step="0.001" value="${(r.ymax==null||r.ymax==="")?"":Number(r.ymax).toFixed(3)}" placeholder="例 0.145"/></td>
+                <td class="right"><button class="btn btn-ghost" data-vc-del="${r.id}">削除</button></td>
+              </tr>
+            `;
+          }).join("")}
+        </tbody>
+      </table>
+    </div>
+    <div class="mini" style="margin-top:8px;">※縦断曲線は対称（BVC=VPI-L/2, EVC=VPI+L/2）</div>
+  </div>
+
+  <div class="card">
+    <h2>縦断：追加測点（出力に統合）</h2>
+    <div class="grid grid-3">
+      <div class="mini">
+        入力：追加距離(m) / k+rem（pitch=${pitch}m）<br/>
+        区切り：空白・カンマ・改行
+      </div>
+      <div>
+        <label>追加測点 追加入力</label>
+        <textarea id="extraTokens_profile" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
+      </div>
+      <div>
+        <button class="btn" id="addExtras_profile">＋ 追加</button>
+        <div style="height:10px;"></div>
+        <button class="btn btn-ghost" id="clearExtras_profile">縦断追加を全クリア</button>
+      </div>
+    </div>
+
+    ${state.extraStations.profile.length ? `
+    <div style="overflow:auto; margin-top:10px;">
+      <table>
+        <thead><tr><th>ID</th><th>測点表示</th><th>追加距離(m)</th><th class="right">削除</th></tr></thead>
+        <tbody>
+          ${state.extraStations.profile.map(x=>`
+            <tr>
+              <td>${x.id}</td>
+              <td>${metersToStaPitch(x.m, pitch, 3)}</td>
+              <td><input data-ex-group="profile" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
+              <td class="right"><button class="btn btn-ghost" data-ex-group="profile" data-ex-del="${x.id}">削除</button></td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>` : `<div class="mini" style="margin-top:10px;">（まだ縦断の追加測点はありません）</div>`}
+  </div>
+`;
+
+document.getElementById("profEnabled").checked = !!prof.enabled;
+document.getElementById("profEnabled").onchange = (e)=>{ state.profile.enabled = !!e.target.checked; saveState(); render(); };
+document.getElementById("startSta").onchange = (e)=>{ state.profile.startSta = parseFloat(e.target.value)||0; saveState(); render(); };
+document.getElementById("startZ").onchange   = (e)=>{ state.profile.startZ = parseFloat(e.target.value)||0; saveState(); render(); };
+
+document.getElementById("addGradeRow").onclick = ()=>{
+  state.profile.grades.push({ id: state.profile.nextGradeId++, nextSta: 0.000, gradePct: 0.000 });
+  saveState(); render();
+};
+document.getElementById("sortGradeRow").onclick = ()=>{
+  state.profile.grades.sort((a,b)=> (Number(a.nextSta)||0) - (Number(b.nextSta)||0));
+  saveState(); render();
+};
+document.getElementById("setEndToTotal").onclick = ()=>{
+  const total = Number(res.total||0);
+  if (!state.profile.grades.length) {
+    state.profile.grades.push({ id: state.profile.nextGradeId++, nextSta: total, gradePct: 0.000 });
+  } else {
+    let idx = 0;
+    for (let i=1;i<state.profile.grades.length;i++){
+      if ((Number(state.profile.grades[i].nextSta)||0) >= (Number(state.profile.grades[idx].nextSta)||0)) idx = i;
     }
-    state.profile.rows.sort((a,b)=> (Number(a.nextSta)||0) - (Number(b.nextSta)||0));
+    state.profile.grades[idx].nextSta = Number(total.toFixed(3));
+  }
+  state.profile.grades.sort((a,b)=> (Number(a.nextSta)||0) - (Number(b.nextSta)||0));
+  saveState(); render();
+};
+
+viewProfile.querySelectorAll("input[data-g-nextsta]").forEach(inp=>{
+  const id = parseInt(inp.getAttribute("data-g-nextsta"),10);
+  inp.onchange = (e)=>{
+    const r = state.profile.grades.find(x=>x.id===id);
+    if (r) r.nextSta = parseFloat(e.target.value)||0;
     saveState(); render();
   };
+});
+viewProfile.querySelectorAll("input[data-g-grade]").forEach(inp=>{
+  const id = parseInt(inp.getAttribute("data-g-grade"),10);
+  inp.onchange = (e)=>{
+    const r = state.profile.grades.find(x=>x.id===id);
+    if (r) r.gradePct = parseFloat(e.target.value)||0;
+    saveState(); render();
+  };
+});
+viewProfile.querySelectorAll("button[data-g-del]").forEach(btn=>{
+  const id = parseInt(btn.getAttribute("data-g-del"),10);
+  btn.onclick = ()=>{
+    state.profile.grades = state.profile.grades.filter(x=>x.id!==id);
+    saveState(); render();
+  };
+});
 
-  viewProfile.querySelectorAll("input[data-nextsta]").forEach(inp=>{
-    const id = parseInt(inp.getAttribute("data-nextsta"),10);
-    inp.onchange = (e)=>{
-      const r = state.profile.rows.find(x=>x.id===id);
-      if (r) r.nextSta = parseFloat(e.target.value)||0;
-      saveState(); render();
-    };
-  });
-  viewProfile.querySelectorAll("input[data-grade]").forEach(inp=>{
-    const id = parseInt(inp.getAttribute("data-grade"),10);
-    inp.onchange = (e)=>{
-      const r = state.profile.rows.find(x=>x.id===id);
-      if (r) r.gradePct = parseFloat(e.target.value)||0;
-      saveState(); render();
-    };
-  });
-  viewProfile.querySelectorAll("input[data-vcl]").forEach(inp=>{
-    const id = parseInt(inp.getAttribute("data-vcl"),10);
-    inp.onchange = (e)=>{
-      const r = state.profile.rows.find(x=>x.id===id);
-      if (r) r.vcL = setOrNull(e.target.value);
-      saveState(); render();
-    };
-  });
-  viewProfile.querySelectorAll("input[data-ymax]").forEach(inp=>{
-    const id = parseInt(inp.getAttribute("data-ymax"),10);
-    inp.onchange = (e)=>{
-      const r = state.profile.rows.find(x=>x.id===id);
-      if (r) r.vcYmax = setOrNull(e.target.value);
-      saveState(); render();
-    };
-  });
-  viewProfile.querySelectorAll("button[data-delgrade]").forEach(btn=>{
-    const id = parseInt(btn.getAttribute("data-delgrade"),10);
-    btn.onclick = ()=>{
-      state.profile.rows = state.profile.rows.filter(x=>x.id!==id);
-      saveState(); render();
-    };
-  });
+const addVcurveBtn = document.getElementById("addVcurve");
+if (addVcurveBtn) {
+  addVcurveBtn.onclick = ()=>{
+    if (!pvInternal.length) {
+      alert("PV点がありません。先に勾配区間を入れてください");
+      return;
+    }
+    // なるべく未使用のPVを選ぶ
+    const used = new Set((state.profile.vcurves||[]).map(x=>(Number(x.vpiSta)||0).toFixed(3)));
+    const pick = pvInternal.find(p=>!used.has(p.sta.toFixed(3))) || pvInternal[0];
+    state.profile.vcurves.push({ id: state.profile.nextVcurveId++, vpiSta: Number(pick.sta.toFixed(3)), L: null, ymax: null });
+    saveState(); render();
+  };
+}
+const sortVcurveBtn = document.getElementById("sortVcurve");
+if (sortVcurveBtn) {
+  sortVcurveBtn.onclick = ()=>{
+    state.profile.vcurves.sort((a,b)=> (Number(a.vpiSta)||0) - (Number(b.vpiSta)||0));
+    saveState(); render();
+  };
+}
+
+viewProfile.querySelectorAll("select[data-vc-vpi]").forEach(sel=>{
+  const id = parseInt(sel.getAttribute("data-vc-vpi"),10);
+  sel.onchange = (e)=>{
+    const r = state.profile.vcurves.find(x=>x.id===id);
+    if (r) r.vpiSta = parseFloat(e.target.value)||0;
+    saveState(); render();
+  };
+});
+viewProfile.querySelectorAll("input[data-vc-l]").forEach(inp=>{
+  const id = parseInt(inp.getAttribute("data-vc-l"),10);
+  inp.onchange = (e)=>{
+    const r = state.profile.vcurves.find(x=>x.id===id);
+    if (r) r.L = setOrNull(e.target.value);
+    saveState(); render();
+  };
+});
+viewProfile.querySelectorAll("input[data-vc-y]").forEach(inp=>{
+  const id = parseInt(inp.getAttribute("data-vc-y"),10);
+  inp.onchange = (e)=>{
+    const r = state.profile.vcurves.find(x=>x.id===id);
+    if (r) r.ymax = setOrNull(e.target.value);
+    saveState(); render();
+  };
+});
+viewProfile.querySelectorAll("button[data-vc-del]").forEach(btn=>{
+  const id = parseInt(btn.getAttribute("data-vc-del"),10);
+  btn.onclick = ()=>{
+    state.profile.vcurves = state.profile.vcurves.filter(x=>x.id!==id);
+    saveState(); render();
+  };
+});
+
+bindExtraUI("profile", viewProfile, pitch);
+
+/* -------- CROSS -------- */
+viewCross.innerHTML = `
+  <div class="card" id="secCross">
+    <h2>横断（追加測点のみ）</h2>
+    <div class="grid grid-3">
+      <div class="mini">
+        今は「横断追加測点」の管理だけ。<br/>
+        ここで追加した測点は最終CSVに統合します。
+      </div>
+      <div>
+        <label>横断：追加測点 追加入力</label>
+        <textarea id="extraTokens_cross" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
+      </div>
+      <div>
+        <button class="btn" id="addExtras_cross">＋ 追加</button>
+        <div style="height:10px;"></div>
+        <button class="btn btn-ghost" id="clearExtras_cross">横断追加を全クリア</button>
+      </div>
+    </div>
+
+    ${state.extraStations.cross.length ? `
+    <div style="overflow:auto; margin-top:10px;">
+      <table>
+        <thead><tr><th>ID</th><th>測点表示</th><th>追加距離(m)</th><th class="right">削除</th></tr></thead>
+        <tbody>
+          ${state.extraStations.cross.map(x=>`
+            <tr>
+              <td>${x.id}</td>
+              <td>${metersToStaPitch(x.m, pitch, 3)}</td>
+              <td><input data-ex-group="cross" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
+              <td class="right"><button class="btn btn-ghost" data-ex-group="cross" data-ex-del="${x.id}">削除</button></td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>` : `<div class="mini" style="margin-top:10px;">（まだ横断の追加測点はありません）</div>`}
+  </div>
+`;
+
+bindExtraUI("cross", viewCross, pitch);
 
   /* -------- OUTPUT -------- */
   const stepInt = Math.max(1, Math.floor(state.outputStep||1));
-  const extraMList = state.extraStations.map(x=>x.m);
-  const stBuild = buildStationList(res.total, stepInt, extraMList);
+  ensureExtraState();
+
+  const planKeyStas = (res.keypoints||[]).filter(k=>Number.isFinite(k.sta)).map(k=>k.sta);
   const profModelOut = buildProfileModel(state.profile, res.total);
+
+  const pvStas = (profModelOut.ok ? (profModelOut.pv||[]).map(p=>p.sta) : []);
+  const vcStas = [];
+  if (profModelOut.ok) {
+    for (const c of (profModelOut.curves||[])) {
+      vcStas.push(c.s0, c.s0 + c.L/2, c.s1);
+    }
+  }
+
+  const sources = [
+    { label: "平面主要点", values: planKeyStas },
+    ...(state.profile.enabled && profModelOut.ok ? [
+      { label: "縦断PV", values: pvStas },
+      { label: "縦断曲線(BVC/VPI/EVC)", values: vcStas },
+    ] : []),
+    { label: "平面追加", values: state.extraStations.plan.map(x=>x.m) },
+    { label: "縦断追加", values: state.extraStations.profile.map(x=>x.m) },
+    { label: "横断追加", values: state.extraStations.cross.map(x=>x.m) },
+    { label: "統合追加", values: state.extraStations.output.map(x=>x.m) },
+  ];
+
+  const stBuild = buildUnifiedStationList(res.total, stepInt, sources);
+
+  const breakdown = {
+    planKey: planKeyStas.length,
+    pv: pvStas.length,
+    vc: vcStas.length,
+    addPlan: state.extraStations.plan.length,
+    addProf: state.extraStations.profile.length,
+    addCross: state.extraStations.cross.length,
+    addOut: state.extraStations.output.length,
+  };
 
   viewOutput.innerHTML = `
     <div class="card" id="secOutput">
-      <h2>測点（ピッチ表示 + 自由測点）</h2>
+      <h2>最終出力（平面 + 縦断 + 横断の追加測点を統合して1本）</h2>
       <div class="grid grid-3">
         <div class="mini">
           <b>総延長</b>：${res.total.toFixed(3)} m<br/>
           <b>測点表示ピッチ</b>：${pitch} m / <b>出力間隔</b>：${stepInt} m<br/>
           <b>縦断GL出力</b>：${state.profile.enabled ? "ON" : "OFF"}
         </div>
-        <div>
-          <label>自由測点 追加（複数可）</label>
-          <textarea id="extraTokens" placeholder="例：101.527 / 101.527m / 5+1.527 / 0+50.000 など&#10;区切り：空白/カンマ/改行"></textarea>
+        <div class="mini">
+          <b>統合点数</b>：${stBuild.stations.length} 点<br/>
+          <span class="pill">基準(0..総延長) ${stBuild.baseCount} 点</span>
+          <span class="pill">追加(主要点+自由) ${stBuild.extraCount} 点</span>
         </div>
-        <div>
-          <button class="btn" id="addExtras">＋ 追加</button>
-          <div style="height:10px;"></div>
-          <button class="btn btn-ghost" id="clearExtras">自由測点を全クリア</button>
+        <div class="mini">
+          <b>内訳</b><br/>
+          平面主要点 ${breakdown.planKey} / 縦断PV ${breakdown.pv} / 縦断曲線点 ${breakdown.vc}<br/>
+          追加：平面 ${breakdown.addPlan} / 縦断 ${breakdown.addProf} / 横断 ${breakdown.addCross} / 統合 ${breakdown.addOut}
         </div>
       </div>
-      <div class="mini" style="margin-top:8px;">自由測点は「追加距離(m)」か「測点(k+rem)」で入力OK。範囲外は出力から除外。</div>
       ${stBuild.notes.map(n=>`<div class="warn">⚠ ${n}</div>`).join("")}
+      <div class="mini" style="margin-top:8px;">※主要点（TS/SC/CS/ST）・PV・BVC/VPI/EVC は自動で含めます（重複は自動排除）</div>
     </div>
 
     <div class="card">
-      <h2>自由測点リスト</h2>
-      ${state.extraStations.length ? `
-      <div style="overflow:auto;">
+      <h2>統合追加測点（出力に統合）</h2>
+      <div class="grid grid-3">
+        <div class="mini">
+          入力：追加距離(m) / k+rem（pitch=${pitch}m）<br/>
+          区切り：空白・カンマ・改行
+        </div>
+        <div>
+          <label>追加測点 追加入力</label>
+          <textarea id="extraTokens_output" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
+        </div>
+        <div>
+          <button class="btn" id="addExtras_output">＋ 追加</button>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ghost" id="clearExtras_output">統合追加を全クリア</button>
+        </div>
+      </div>
+
+      ${state.extraStations.output.length ? `
+      <div style="overflow:auto; margin-top:10px;">
         <table>
           <thead><tr><th>ID</th><th>測点表示</th><th>追加距離(m)</th><th class="right">削除</th></tr></thead>
           <tbody>
-            ${state.extraStations.map(x=>`
+            ${state.extraStations.output.map(x=>`
               <tr>
                 <td>${x.id}</td>
                 <td>${metersToStaPitch(x.m, pitch, 3)}</td>
-                <td><input data-ex-m="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
-                <td class="right"><button class="btn btn-ghost" data-ex-del="${x.id}">削除</button></td>
+                <td><input data-ex-group="output" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
+                <td class="right"><button class="btn btn-ghost" data-ex-group="output" data-ex-del="${x.id}">削除</button></td>
               </tr>
             `).join("")}
           </tbody>
         </table>
-      </div>` : `<div class="mini">（まだ自由測点はありません）</div>`}
+      </div>` : `<div class="mini" style="margin-top:10px;">（まだ統合追加測点はありません）</div>`}
     </div>
 
     <div class="card">
@@ -1376,26 +1874,49 @@ const render = () => {
         <table>
           <thead><tr><th>測点</th><th>追加距離(m)</th><th>N</th><th>E</th><th>Az</th><th>GL</th></tr></thead>
           <tbody>
-            ${stBuild.stations.slice(0,40).map(s=>{
+            ${stBuild.stations.slice(0,200).map(s=>{
               const p = evalAlignment(res.segments, s);
-              const z = state.profile.enabled ? evalProfileZ(profModelOut, s) : NaN;
+              const gl = state.profile.enabled ? evalProfileZ(profModelOut, s) : NaN;
               return `
                 <tr>
                   <td>${metersToStaPitch(s, pitch, 3)}</td>
                   <td>${s.toFixed(3)}</td>
                   <td>${p.N.toFixed(d)}</td>
                   <td>${p.E.toFixed(d)}</td>
-                  <td>${p.az.toFixed(3)}</td>
-                  <td>${Number.isFinite(z) ? z.toFixed(3) : ""}</td>
-                </tr>`;
+                  <td>${p.az.toFixed(4)}</td>
+                  <td>${Number.isFinite(gl) ? gl.toFixed(3) : ""}</td>
+                </tr>
+              `;
             }).join("")}
           </tbody>
         </table>
       </div>
-      <div class="mini" style="margin-top:8px;">※プレビューは先頭40点のみ</div>
+      <div class="mini" style="margin-top:8px;">※プレビューは先頭200点まで</div>
     </div>
   `;
 
+  bindExtraUI("output", viewOutput, pitch);
+
+  const dlCSV = document.getElementById("dlCSV");
+  if (dlCSV) {
+    dlCSV.onclick = ()=> {
+      const lines = [];
+      lines.push(["STA","STA_M","N","E","AZ","GL"].join(","));
+      for (const s of stBuild.stations) {
+        const p = evalAlignment(res.segments, s);
+        const gl = state.profile.enabled ? evalProfileZ(profModelOut, s) : NaN;
+        lines.push([
+          metersToStaPitch(s, pitch, 3),
+          s.toFixed(3),
+          p.N.toFixed(d),
+          p.E.toFixed(d),
+          p.az.toFixed(4),
+          Number.isFinite(gl) ? gl.toFixed(3) : ""
+        ].join(","));
+      }
+      downloadText(lines.join("\n"), `${state.projectName}_中心線.csv`, "text/csv;charset=utf-8");
+    };
+  }
   /* -------- SAVE -------- */
   viewSave.innerHTML = `
     <div class="card" id="secSave">
@@ -1422,75 +1943,6 @@ const render = () => {
     </div>
   `;
 
-  /* output bind */
-  const addExtrasBtn = document.getElementById("addExtras");
-  if (addExtrasBtn) {
-    addExtrasBtn.onclick = ()=>{
-      const ta = document.getElementById("extraTokens");
-      const txt = (ta.value || "").trim();
-      if (!txt) return;
-      const parts = txt.split(/[\s,]+/).map(s=>s.trim()).filter(Boolean);
-      const errs = [];
-      for (const tok of parts) {
-        try {
-          const mv = parseTokenToM(tok, pitch);
-          state.extraStations.push({ id: state.nextExtraId++, m: mv });
-        } catch(e) {
-          errs.push(`${tok}: ${e.message || e}`);
-        }
-      }
-      ta.value = "";
-      saveState();
-      if (errs.length) alert("追加エラー:\n" + errs.join("\n"));
-      render();
-    };
-  }
-
-  const clearExtrasBtn = document.getElementById("clearExtras");
-  if (clearExtrasBtn) {
-    clearExtrasBtn.onclick = ()=>{
-      state.extraStations = [];
-      saveState(); render();
-    };
-  }
-
-  viewOutput.querySelectorAll("input[data-ex-m]").forEach(inp=>{
-    const id = parseInt(inp.getAttribute("data-ex-m"),10);
-    inp.oninput = (e)=>{
-      const row = state.extraStations.find(x=>x.id===id);
-      if (row) row.m = parseFloat(e.target.value)||0;
-      saveState(); render();
-    };
-  });
-
-  viewOutput.querySelectorAll("button[data-ex-del]").forEach(btn=>{
-    const id = parseInt(btn.getAttribute("data-ex-del"),10);
-    btn.onclick = ()=>{
-      state.extraStations = state.extraStations.filter(x=>x.id!==id);
-      saveState(); render();
-    };
-  });
-
-  const dl = document.getElementById("dlCSV");
-  if (dl) {
-    dl.onclick = ()=>{
-      const { stations } = buildStationList(res.total, stepInt, state.extraStations.map(x=>x.m));
-      const rows = stations.map(s=>{
-        const p = evalAlignment(res.segments, s);
-        const z = state.profile.enabled ? evalProfileZ(profModelOut, s) : NaN;
-        return {
-          "測点": metersToStaPitch(s, pitch, 3),
-          "追加距離(m)": s.toFixed(3),
-          "北座標N(m)": p.N.toFixed(d),
-          "東座標E(m)": p.E.toFixed(d),
-          "方位角(deg)": p.az.toFixed(3),
-          "計画高GL(m)": Number.isFinite(z) ? z.toFixed(3) : "",
-        };
-      });
-      downloadCSV(rows, `${state.projectName}_中心線.csv`);
-    };
-  }
-
   /* save bind */
   const saveBtn = document.getElementById("saveJSON");
   if (saveBtn) {
@@ -1509,12 +1961,7 @@ const render = () => {
         const txt = await f.text();
         const obj = JSON.parse(txt);
         if (!obj || typeof obj !== "object") throw new Error("JSONが不正");
-        state = Object.assign(state, obj);
-        state.profile = Object.assign({enabled:true,startSta:0,startZ:0,rows:[],nextRowId:1}, state.profile||{});
-        state.profile.rows = Array.isArray(state.profile.rows) ? state.profile.rows : [];
-        state.profile.nextRowId = Number.isFinite(state.profile.nextRowId)
-          ? state.profile.nextRowId
-          : (Math.max(0, ...state.profile.rows.map(r=>r.id||0))+1);
+        state = normalizeState(Object.assign(state, obj));
         saveState();
         render();
         alert("読み込み完了");
