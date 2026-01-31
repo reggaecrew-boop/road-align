@@ -213,7 +213,47 @@ let state = {
       { id: 2, vpiSta: 300.000, L: null,   ymax: 0.145 }
     ],
     nextVcurveId: 3,
+  },
+
+  // ===== 横断（中心からの勾配区間） =====
+  // 共通（全測点）テンプレ + 測点別の例外（必要な測点だけ）
+  cross: {
+    enabled: true,
+
+
+    // 拡幅割付（テーパ）：例外測点（最外端距離）を制御点にして線形補間
+    taper: { enabled: true, anchorRight: 3.000, anchorLeft: 3.000 },
+
+    // ---- 共通（全測点） ----
+    // 中心(0.000m, Z=0.000m) から外側へ。end は中心からの距離(m)。
+    // 勾配(%)は「外側へ進むほど Z が上がる：+ / 下がる：-」で入力。
+    right: {
+      segs: [
+        { id: 1, end: 3.000, slopePct: -2.000 },
+        { id: 2, end: 4.500, slopePct:  0.000 },
+        { id: 3, end: 5.000, slopePct: -1.000 },
+      ],
+      nextSegId: 4
+    },
+    left: {
+      segs: [
+        { id: 1, end: 3.000, slopePct: -2.000 },
+        { id: 2, end: 4.500, slopePct:  0.000 },
+        { id: 3, end: 5.000, slopePct: -1.000 },
+      ],
+      nextSegId: 4
+    },
+
+    // ---- 測点別（例外） ----
+    // key: "100.000" のように 0.001m丸めの測点文字列
+    // value: { right:{segs,nextSegId}, left:{...} }
+    overrides: {},
+
+    // UI状態（選択中の例外測点 / プレビュー測点）
+    ui: { selectedStaKey: "", previewTok: "" }
   }
+
+
 };
 
 function saveState() {
@@ -300,6 +340,66 @@ function normalizeState(s) {
   s.profile.nextVcurveId = Number.isFinite(s.profile.nextVcurveId)
     ? s.profile.nextVcurveId
     : (Math.max(0, ...s.profile.vcurves.map(r => r.id || 0)) + 1);
+
+  
+  // --- cross ---
+  s.cross = Object.assign({
+    enabled: true,
+    taper: { enabled: true, anchorRight: 3.000, anchorLeft: 3.000 },
+    right: { segs: [], nextSegId: 1 },
+    left:  { segs: [], nextSegId: 1 },
+    overrides: {},
+    ui: { selectedStaKey: "", previewTok: "" },
+  }, s.cross || {});
+
+  if (!s.cross.overrides || typeof s.cross.overrides !== "object" || Array.isArray(s.cross.overrides)) {
+    s.cross.overrides = {};
+  }
+  if (!s.cross.ui || typeof s.cross.ui !== "object" || Array.isArray(s.cross.ui)) {
+    s.cross.ui = { selectedStaKey: "", previewTok: "" };
+  }
+  if (typeof s.cross.ui.selectedStaKey !== "string") s.cross.ui.selectedStaKey = "";
+  if (typeof s.cross.ui.previewTok !== "string") s.cross.ui.previewTok = "";
+
+  const normSide = (obj)=>{
+    obj = (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
+    let segs = Array.isArray(obj.segs) ? obj.segs : [];
+    segs = segs.map((r, idx)=>({
+      id: (r && Number.isFinite(r.id)) ? r.id : (idx + 1),
+      end: Number(r && r.end),
+      slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
+    })).filter(r => Number.isFinite(r.end) && r.end > 0);
+
+    segs.sort((a,b)=>a.end-b.end);
+
+    let nextSegId = obj.nextSegId;
+    if (!Number.isFinite(nextSegId)) {
+      const mx = Math.max(0, ...segs.map(r => r.id || 0));
+      nextSegId = mx + 1;
+    }
+    return { segs, nextSegId };
+  };
+
+  s.cross.right = normSide(s.cross.right);
+  s.cross.left  = normSide(s.cross.left);
+
+  const newOver = {};
+  for (const [k, ov] of Object.entries(s.cross.overrides || {})) {
+    const m = parseFloat(k);
+    if (!Number.isFinite(m)) continue;
+    const key = m.toFixed(3);
+    if (!ov || typeof ov !== "object" || Array.isArray(ov)) continue;
+    newOver[key] = {
+      right: normSide(ov.right),
+      left:  normSide(ov.left),
+    };
+  }
+  s.cross.overrides = newOver;
+
+  if (s.cross.ui.selectedStaKey && !s.cross.overrides[s.cross.ui.selectedStaKey]) {
+    s.cross.ui.selectedStaKey = "";
+  }
+
 
   return s;
 }
@@ -497,6 +597,507 @@ const bindExtraUI = (groupKey, rootEl, pitch)=> {
   });
 };
 
+
+
+/* =========================
+   Cross slope (横断)
+========================= */
+const ensureCrossState = ()=>{
+  if (!state.cross || typeof state.cross !== 'object' || Array.isArray(state.cross)) {
+    state.cross = {
+      enabled: true,
+      taper: { enabled: true, anchorRight: 3.000, anchorLeft: 3.000 },
+      right: { segs: [], nextSegId: 1 },
+      left:  { segs: [], nextSegId: 1 },
+      overrides: {},
+      ui: { selectedStaKey: "", previewTok: "" },
+    };
+  }
+  if (!state.cross.overrides || typeof state.cross.overrides !== 'object' || Array.isArray(state.cross.overrides)) {
+    state.cross.overrides = {};
+  }
+  if (!state.cross.ui || typeof state.cross.ui !== 'object' || Array.isArray(state.cross.ui)) {
+    state.cross.ui = { selectedStaKey: "" };
+  }
+  if (typeof state.cross.ui.selectedStaKey !== "string") state.cross.ui.selectedStaKey = "";
+
+  // taper
+  if (!state.cross.taper || typeof state.cross.taper !== 'object' || Array.isArray(state.cross.taper)) {
+    state.cross.taper = { enabled: true, anchorRight: 3.000, anchorLeft: 3.000 };
+  }
+  if (typeof state.cross.taper.enabled !== 'boolean') state.cross.taper.enabled = true;
+  if (!Number.isFinite(Number(state.cross.taper.anchorRight))) state.cross.taper.anchorRight = 3.000;
+  if (!Number.isFinite(Number(state.cross.taper.anchorLeft))) state.cross.taper.anchorLeft = 3.000;
+
+  if (typeof state.cross.ui.previewTok !== 'string') state.cross.ui.previewTok = ;
+
+  const ensureSide = (obj)=>{
+    obj = (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : { segs: [], nextSegId: 1 };
+    if (!Array.isArray(obj.segs)) obj.segs = [];
+    obj.segs = obj.segs.map((r, idx)=>({
+      id: (r && Number.isFinite(r.id)) ? r.id : (idx + 1),
+      end: Number(r && r.end),
+      slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
+    }));
+    if (!Number.isFinite(obj.nextSegId)) {
+      const mx = Math.max(0, ...obj.segs.map(r=>r.id||0));
+      obj.nextSegId = mx + 1;
+    }
+    return obj;
+  };
+
+  state.cross.right = ensureSide(state.cross.right);
+  state.cross.left  = ensureSide(state.cross.left);
+
+  for (const k of Object.keys(state.cross.overrides)) {
+    const ov = state.cross.overrides[k];
+    if (!ov || typeof ov !== 'object' || Array.isArray(ov)) { delete state.cross.overrides[k]; continue; }
+    ov.right = ensureSide(ov.right);
+    ov.left  = ensureSide(ov.left);
+  }
+
+  const sel = state.cross.ui.selectedStaKey;
+  if (sel && !state.cross.overrides[sel]) state.cross.ui.selectedStaKey = "";
+};
+
+const cloneCrossSide = (src)=>{
+  const segs = (src?.segs || []).map((r, i)=>({
+    id: i + 1,
+    end: Number(r?.end) || 0,
+    slopePct: Number(r?.slopePct) || 0,
+  })).filter(r => Number.isFinite(r.end) && r.end > 0);
+  const mx = Math.max(0, ...segs.map(r=>r.id||0));
+  return { segs, nextSegId: mx + 1 };
+};
+
+const ensureCrossOverride = (staKey)=>{
+  ensureCrossState();
+  if (!staKey) return;
+  if (!state.cross.overrides[staKey]) {
+    state.cross.overrides[staKey] = {
+      right: cloneCrossSide(state.cross.right),
+      left:  cloneCrossSide(state.cross.left),
+    };
+  }
+  const ov = state.cross.overrides[staKey];
+  if (!ov.right) ov.right = cloneCrossSide(state.cross.right);
+  if (!ov.left)  ov.left  = cloneCrossSide(state.cross.left);
+};
+
+const getCrossStore = (scope, side, staKey)=>{
+  ensureCrossState();
+  if (scope === "ovr") {
+    ensureCrossOverride(staKey);
+    return state.cross.overrides[staKey][side];
+  }
+  return state.cross[side];
+};
+
+const sortCrossSegs = (scope, side, staKey)=>{
+  const store = getCrossStore(scope, side, staKey);
+  store.segs.sort((a,b)=> (Number(a.end)||0) - (Number(b.end)||0));
+};
+
+const normalizeCrossToOuterEnd = (store, endVal)=>{
+  endVal = Number(endVal);
+  if (!Number.isFinite(endVal) || endVal <= 0) return;
+
+  store.segs = Array.isArray(store.segs) ? store.segs.slice() : [];
+  store.segs = store.segs
+    .map((r, idx)=>({
+      id: (r && Number.isFinite(r.id)) ? r.id : (idx + 1),
+      end: Number(r && r.end),
+      slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
+    }))
+    .filter(r => Number.isFinite(r.end) && r.end > 0);
+
+  store.segs.sort((a,b)=>a.end-b.end);
+
+  // endVal より外側の区間は削除
+  store.segs = store.segs.filter(r => r.end <= endVal + 1e-9);
+
+  if (!store.segs.length) {
+    store.segs = [{ id: 1, end: Number(endVal.toFixed(3)), slopePct: 0.0 }];
+    store.nextSegId = 2;
+    return;
+  }
+
+  const last = store.segs[store.segs.length - 1];
+  const prevEnd = (store.segs.length >= 2) ? store.segs[store.segs.length - 2].end : 0;
+  last.end = Number(Math.max(endVal, prevEnd).toFixed(3));
+
+  const mx = Math.max(0, ...store.segs.map(r=>r.id||0));
+  if (!Number.isFinite(store.nextSegId)) store.nextSegId = mx + 1;
+  store.nextSegId = Math.max(store.nextSegId, mx + 1);
+};
+
+const applyCrossOuterEnd = (rightEnd, leftEnd, affectOverrides)=>{
+  ensureCrossState();
+  normalizeCrossToOuterEnd(getCrossStore("common","right"), rightEnd);
+  normalizeCrossToOuterEnd(getCrossStore("common","left"),  leftEnd);
+  sortCrossSegs("common","right");
+  sortCrossSegs("common","left");
+
+  if (affectOverrides) {
+    for (const k of Object.keys(state.cross.overrides || {})) {
+      normalizeCrossToOuterEnd(getCrossStore("ovr","right", k), rightEnd);
+      normalizeCrossToOuterEnd(getCrossStore("ovr","left",  k), leftEnd);
+      sortCrossSegs("ovr","right", k);
+      sortCrossSegs("ovr","left",  k);
+    }
+  }
+};
+
+const computeCrossSide = (scope, side, staKey)=>{
+  const store = getCrossStore(scope, side, staKey);
+  const segs = (store.segs||[]).slice().sort((a,b)=> (Number(a.end)||0) - (Number(b.end)||0));
+  const warnings = [];
+  let start = 0;
+  let z = 0;
+  const rows = [];
+
+  for (const r of segs) {
+    const end = Number(r.end);
+    const slopePct = Number(r.slopePct)||0;
+    if (!Number.isFinite(end) || end <= 0) { warnings.push('end<=0 の行があります'); continue; }
+    const span = end - start;
+    if (span < -1e-9) { warnings.push('距離が昇順ではありません'); continue; }
+    if (Math.abs(span) < 1e-9) { warnings.push('同一距離(end)の行があります'); }
+    const dz = (slopePct/100.0) * span;
+    z += dz;
+    rows.push({ id: r.id, start, end, slopePct, span, dz, zEnd: z });
+    start = end;
+  }
+  return { rows, lastEnd: start, lastZ: z, warnings };
+};
+
+
+// ---- Cross taper + preview ----
+const computeCrossRowsFromSegs = (segs)=>{
+  segs = (Array.isArray(segs)?segs:[]).slice().sort((a,b)=> (Number(a.end)||0)-(Number(b.end)||0));
+  const warnings = [];
+  let start = 0;
+  let z = 0;
+  const rows = [];
+  for (const r of segs) {
+    const end = Number(r.end);
+    const slopePct = Number(r.slopePct)||0;
+    if (!Number.isFinite(end) || end <= 0) { warnings.push('end<=0 の行があります'); continue; }
+    const span = end - start;
+    if (span < -1e-9) { warnings.push('距離が昇順ではありません'); continue; }
+    if (Math.abs(span) < 1e-9) { warnings.push('同一距離(end)の行があります'); }
+    const dz = (slopePct/100.0) * span;
+    z += dz;
+    rows.push({ start, end, slopePct, dz, zEnd: z });
+    start = end;
+  }
+  return { rows, lastEnd: start, lastZ: z, warnings };
+};
+
+const getCrossControlPoints = (side)=>{
+  ensureCrossState();
+  const pts = [];
+  for (const k of Object.keys(state.cross.overrides||{})) {
+    const m = Number(k);
+    if (!Number.isFinite(m)) continue;
+    const ov = state.cross.overrides[k];
+    const store = ov && ov[side];
+    const c = computeCrossRowsFromSegs(store?.segs||[]);
+    if (Number.isFinite(c.lastEnd) && c.lastEnd > 0) pts.push({ m, w: c.lastEnd });
+  }
+  pts.sort((a,b)=>a.m-b.m);
+  return pts;
+};
+
+const getCrossWidthAt = (m, side)=>{
+  ensureCrossState();
+  const base = computeCrossRowsFromSegs(state.cross[side]?.segs||[]);
+  const baseW = base.lastEnd || 0;
+  const pts = getCrossControlPoints(side);
+  const mk = Number(Number(m).toFixed(3));
+
+  for (const p of pts) {
+    if (Math.abs(p.m - mk) < 1e-6) return { w: p.w, mode: '制御点', prev: p, next: p, baseW };
+  }
+
+  let prev = null, next = null;
+  for (const p of pts) {
+    if (p.m < mk) prev = p;
+    else if (p.m > mk) { next = p; break; }
+  }
+
+  if (prev && next) {
+    const t = (mk - prev.m) / Math.max(1e-9, (next.m - prev.m));
+    return { w: prev.w + (next.w - prev.w)*t, mode: '線形補間', prev, next, baseW };
+  }
+  if (prev) return { w: prev.w, mode: '前の制御点保持', prev, next, baseW };
+  if (next) return { w: next.w, mode: '後の制御点保持', prev, next, baseW };
+  return { w: baseW, mode: '共通', prev, next, baseW };
+};
+
+const widenCrossSegsFromCommon = (commonSegs, targetW, anchor)=>{
+  commonSegs = (Array.isArray(commonSegs)?commonSegs:[]).slice().sort((a,b)=> (Number(a.end)||0)-(Number(b.end)||0));
+  const base = computeCrossRowsFromSegs(commonSegs);
+  const baseW = base.lastEnd || 0;
+  targetW = Number(targetW);
+  if (!Number.isFinite(targetW) || targetW <= 0) targetW = baseW;
+
+  anchor = Number(anchor);
+  if (!Number.isFinite(anchor) || anchor < 0) anchor = 0;
+
+  // targetW が anchor より小さい場合は anchor にクランプ
+  if (targetW < anchor) targetW = anchor;
+
+  const delta = targetW - baseW;
+  if (Math.abs(delta) < 1e-9) {
+    // 念のため最後を targetW に合わせる
+    const out = commonSegs.map((r,i)=>({ id: i+1, end: Number(r.end), slopePct: Number(r.slopePct)||0 }));
+    if (out.length) out[out.length-1].end = Number(targetW.toFixed(3));
+    return out;
+  }
+
+  const out = [];
+  let start = 0;
+  for (const r of commonSegs) {
+    const end = Number(r.end);
+    const slopePct = Number(r.slopePct)||0;
+    if (!Number.isFinite(end) || end <= 0) continue;
+
+    if (end <= anchor + 1e-9) {
+      out.push({ end, slopePct });
+    } else if (start < anchor - 1e-9 && end > anchor + 1e-9) {
+      // cross anchor -> split
+      out.push({ end: anchor, slopePct });
+      out.push({ end: end + delta, slopePct });
+    } else {
+      out.push({ end: end + delta, slopePct });
+    }
+    start = end;
+  }
+
+  // 0以下/逆転を除去しつつ、targetW でトリム
+  const cleaned = [];
+  let last = 0;
+  for (const r of out.sort((a,b)=>a.end-b.end)) {
+    let e = Number(r.end);
+    if (!Number.isFinite(e)) continue;
+    if (e <= last + 1e-9) continue;
+    if (e > targetW + 1e-9) continue;
+    cleaned.push({ end: e, slopePct: Number(r.slopePct)||0 });
+    last = e;
+  }
+
+  if (!cleaned.length) {
+    cleaned.push({ end: Number(targetW.toFixed(3)), slopePct: 0.0 });
+  } else {
+    const prevEnd = (cleaned.length>=2) ? cleaned[cleaned.length-2].end : 0;
+    cleaned[cleaned.length-1].end = Number(Math.max(targetW, prevEnd).toFixed(3));
+  }
+
+  return cleaned.map((r,i)=>({ id: i+1, end: Number(r.end), slopePct: Number(r.slopePct)||0 }));
+};
+
+const getEffectiveCrossSegsAt = (m, side)=>{
+  ensureCrossState();
+  const key = Number(m).toFixed(3);
+  const hasOvr = !!(state.cross.overrides && state.cross.overrides[key]);
+  const taperOn = !!(state.cross.taper && state.cross.taper.enabled);
+
+  if (hasOvr) {
+    const segs = (state.cross.overrides[key][side]?.segs||[]).slice();
+    const info = { source: '例外', width: computeCrossRowsFromSegs(segs).lastEnd || 0, mode: '制御点' };
+    return { segs, info };
+  }
+
+  const commonSegs = (state.cross[side]?.segs||[]).slice();
+  if (!taperOn) {
+    const info = { source: '共通', width: computeCrossRowsFromSegs(commonSegs).lastEnd || 0, mode: '共通' };
+    return { segs: commonSegs, info };
+  }
+
+  const wInfo = getCrossWidthAt(m, side);
+  const anchor = (side==='right') ? Number(state.cross.taper.anchorRight) : Number(state.cross.taper.anchorLeft);
+  const segs = widenCrossSegsFromCommon(commonSegs, wInfo.w, anchor);
+  const info = { source: '割付', width: wInfo.w, mode: wInfo.mode, prev: wInfo.prev, next: wInfo.next };
+  return { segs, info };
+};
+
+const setOverrideWidthFromCommon = (staKey, rightW, leftW)=>{
+  ensureCrossOverride(staKey);
+  const ar = Number(state.cross.taper?.anchorRight ?? 0);
+  const al = Number(state.cross.taper?.anchorLeft ?? 0);
+  if (Number.isFinite(rightW) && rightW>0) {
+    state.cross.overrides[staKey].right.segs = widenCrossSegsFromCommon(state.cross.right.segs, rightW, ar);
+    state.cross.overrides[staKey].right.nextSegId = Math.max(1, state.cross.overrides[staKey].right.segs.length + 1);
+  }
+  if (Number.isFinite(leftW) && leftW>0) {
+    state.cross.overrides[staKey].left.segs = widenCrossSegsFromCommon(state.cross.left.segs, leftW, al);
+    state.cross.overrides[staKey].left.nextSegId = Math.max(1, state.cross.overrides[staKey].left.segs.length + 1);
+  }
+};
+
+const drawCrossPreviewCanvas = (canvas, pts, labels)=>{
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  const pad = 30;
+  const xs = pts.map(p=>p.x);
+  const zs = pts.map(p=>p.z);
+  let minX = Math.min(...xs), maxX = Math.max(...xs);
+  let minZ = Math.min(...zs), maxZ = Math.max(...zs);
+  const dx = Math.max(1e-6, maxX - minX);
+  const dz = Math.max(1e-6, maxZ - minZ);
+  // add margin
+  minX -= dx*0.08; maxX += dx*0.08;
+  minZ -= dz*0.15; maxZ += dz*0.15;
+
+  const sx = (W - pad*2) / Math.max(1e-6, (maxX - minX));
+  const sy = (H - pad*2) / Math.max(1e-6, (maxZ - minZ));
+
+  const tx = (x)=> pad + (x - minX) * sx;
+  const ty = (z)=> H - pad - (z - minZ) * sy;
+
+  // axes
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.beginPath();
+  ctx.moveTo(tx(0), pad);
+  ctx.lineTo(tx(0), H-pad);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(pad, ty(0));
+  ctx.lineTo(W-pad, ty(0));
+  ctx.stroke();
+
+  // polyline
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#2563eb';
+  ctx.beginPath();
+  for (let i=0;i<pts.length;i++) {
+    const p = pts[i];
+    const X = tx(p.x), Y = ty(p.z);
+    if (i===0) ctx.moveTo(X,Y);
+    else ctx.lineTo(X,Y);
+  }
+  ctx.stroke();
+
+  // points
+  ctx.fillStyle = '#0f172a';
+  for (const p of pts) {
+    const X = tx(p.x), Y = ty(p.z);
+    ctx.beginPath();
+    ctx.arc(X,Y,3,0,Math.PI*2);
+    ctx.fill();
+  }
+
+  // labels (optional)
+  if (labels && labels.length) {
+    ctx.font = '12px ui-sans-serif, system-ui';
+    ctx.fillStyle = '#334155';
+    for (const l of labels) {
+      const X = tx(l.x), Y = ty(l.z);
+      ctx.fillText(l.text, X+6, Y-6);
+    }
+  }
+};
+
+
+const setCrossExample = (scope, side, staKey)=>{
+  const store = getCrossStore(scope, side, staKey);
+  store.segs = [
+    { id: 1, end: 3.000, slopePct: -2.000 },
+    { id: 2, end: 4.500, slopePct:  0.000 },
+    { id: 3, end: 5.000, slopePct: -1.000 },
+  ];
+  store.nextSegId = 4;
+  saveState();
+  render();
+};
+
+const bindCrossSlopeUI = (rootEl)=>{
+  ensureCrossState();
+
+  const bindSide = (side, scope, staKey)=>{
+    const suffix = (scope === "ovr") ? `ovr_${side}` : side;
+    const addBtn = document.getElementById(`addCrossSeg_${suffix}`);
+    const clearBtn = document.getElementById(`clearCrossSeg_${suffix}`);
+    const exBtn = document.getElementById(`exampleCrossSeg_${suffix}`);
+
+    if (addBtn) {
+      addBtn.onclick = ()=>{
+        const store = getCrossStore(scope, side, staKey);
+        const last = Math.max(0, ...(store.segs||[]).map(r=>Number(r.end)||0));
+        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), slopePct: 0.0 });
+        sortCrossSegs(scope, side, staKey);
+        saveState();
+        render();
+      };
+    }
+    if (clearBtn) {
+      clearBtn.onclick = ()=>{
+        const store = getCrossStore(scope, side, staKey);
+        store.segs = [];
+        store.nextSegId = 1;
+        saveState();
+        render();
+      };
+    }
+    if (exBtn) {
+      exBtn.onclick = ()=> setCrossExample(scope, side, staKey);
+    }
+
+    if (!rootEl) return;
+
+    const staSel = (scope === "ovr" && staKey) ? `[data-xs-sta="${staKey}"]` : ``;
+
+    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-end]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute('data-xs-id'),10);
+      inp.oninput = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (r) r.end = parseFloat(e.target.value)||0;
+        sortCrossSegs(scope, side, staKey);
+        saveState();
+        render();
+      };
+    });
+
+    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-slope]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute('data-xs-id'),10);
+      inp.oninput = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (r) r.slopePct = parseFloat(e.target.value)||0;
+        saveState();
+        render();
+      };
+    });
+
+    rootEl.querySelectorAll(`button[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-del]`).forEach(btn=>{
+      const id = parseInt(btn.getAttribute('data-xs-del'),10);
+      btn.onclick = ()=>{
+        const store = getCrossStore(scope, side, staKey);
+        store.segs = (store.segs||[]).filter(x=>x.id!==id);
+        saveState();
+        render();
+      };
+    });
+  };
+
+  // 共通
+  bindSide('right', 'common');
+  bindSide('left',  'common');
+
+  // 測点別（選択中のみ）
+  const sel = state.cross.ui.selectedStaKey;
+  if (sel && state.cross.overrides && state.cross.overrides[sel]) {
+    bindSide('right', 'ovr', sel);
+    bindSide('left',  'ovr', sel);
+  }
+};
 
 /* =========================
    Profile (Vertical)
@@ -1715,45 +2316,482 @@ viewProfile.querySelectorAll("button[data-vc-del]").forEach(btn=>{
 bindExtraUI("profile", viewProfile, pitch);
 
 /* -------- CROSS -------- */
-viewCross.innerHTML = `
-  <div class="card" id="secCross">
-    <h2>横断（追加測点のみ）</h2>
-    <div class="grid grid-3">
-      <div class="mini">
-        今は「横断追加測点」の管理だけ。<br/>
-        ここで追加した測点は最終CSVに統合します。
+  ensureCrossState();
+
+  const cr = computeCrossSide("common", "right");
+  const cl = computeCrossSide("common", "left");
+
+  const selKey = state.cross.ui.selectedStaKey || "";
+  const hasSel = !!(selKey && state.cross.overrides && state.cross.overrides[selKey]);
+  const or = hasSel ? computeCrossSide("ovr", "right", selKey) : null;
+  const ol = hasSel ? computeCrossSide("ovr", "left",  selKey) : null;
+
+  const crossRowsHtml = (scope, side, staKey)=>{
+    const store = getCrossStore(scope, side, staKey);
+    const segs = store.segs || [];
+    const staAttr = (scope === "ovr" && staKey) ? ` data-xs-sta="${staKey}"` : "";
+
+    if (!segs.length) {
+      return `<tr><td colspan="6" class="mini">（まだ区間がありません）</td></tr>`;
+    }
+
+    let start = 0;
+    let z = 0;
+    const out = [];
+
+    for (const r of segs) {
+      const end = Number(r.end);
+      const slopePct = Number(r.slopePct)||0;
+      const span = (Number.isFinite(end) ? (end - start) : NaN);
+      const dz = Number.isFinite(span) ? (slopePct/100.0)*span : NaN;
+      if (Number.isFinite(dz)) z += dz;
+
+      out.push(`
+        <tr>
+          <td class="right">${start.toFixed(3)}</td>
+          <td><input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-end type="number" step="0.001" value="${Number.isFinite(end)?end:0}" /></td>
+          <td><input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-slope type="number" step="0.001" value="${slopePct}" /></td>
+          <td class="right">${Number.isFinite(dz)?dz.toFixed(3):""}</td>
+          <td class="right">${Number.isFinite(z)?z.toFixed(3):""}</td>
+          <td class="right"><button class="btn btn-ghost" data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-del="${r.id}">削除</button></td>
+        </tr>
+      `);
+
+      if (Number.isFinite(end)) start = end;
+    }
+
+    return out.join("");
+  };
+
+  const warnHtml = (arr)=> arr && arr.length ? `<div class="warn">${arr.join(" / ")}</div>` : "";
+
+  const ovKeys = Object.keys(state.cross.overrides||{}).slice().sort((a,b)=> (Number(a)||0) - (Number(b)||0));
+  const ovOptions = ovKeys.map(k=>{
+    const m = Number(k);
+    const label = Number.isFinite(m) ? `${metersToStaPitch(m, pitch, 3)} (${k}m)` : k;
+    const sel = (k===selKey) ? "selected" : "";
+    return `<option value="${k}" ${sel}>${label}</option>`;
+  }).join("");
+
+  viewCross.innerHTML = `
+    <div class="card" id="secCross">
+      <h2>横断：勾配区間（中心 → 外側）</h2>
+      <div class="mini">中心から外側へ、任意距離で勾配変化点を作れます。距離は自動で昇順に整列されます。</div>
+
+      <div class="row" style="margin-top:10px;">
+        <div style="width:200px;">
+          <label>全測点 最外端距離 右(+)(m)</label>
+          <input id="bulkCrossEnd_right" type="number" step="0.001" min="0" value="${cr.lastEnd.toFixed(3)}" />
+        </div>
+        <div style="width:200px;">
+          <label>全測点 最外端距離 左(-)(m)</label>
+          <input id="bulkCrossEnd_left" type="number" step="0.001" min="0" value="${cl.lastEnd.toFixed(3)}" />
+        </div>
+        <div style="flex:1; min-width:200px;">
+          <label>一括適用</label>
+          <button class="btn" id="applyBulkCrossEnd">最外端を一括更新</button>
+          <div class="mini" style="margin-top:6px;">
+            <label class="mini"><input id="bulkAffectOverrides" type="checkbox" checked /> 測点別の例外にも適用</label>
+          </div>
+        </div>
+
       </div>
-      <div>
-        <label>横断：追加測点 追加入力</label>
-        <textarea id="extraTokens_cross" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
+
+      <div class="row" style="margin-top:10px; align-items:flex-end;">
+        <div style="width:180px;">
+          <label>拡幅割付（線形）</label>
+          <label class="mini"><input id="xsTaperEnabled" type="checkbox" ${state.cross.taper && state.cross.taper.enabled ? "checked" : ""} /> 有効</label>
+        </div>
+        <div style="width:200px;">
+          <label>アンカー距離 右(+)(m)</label>
+          <input id="xsAnchorRight" type="number" step="0.001" min="0" value="${Number(state.cross.taper?.anchorRight ?? 3.0).toFixed(3)}" />
+        </div>
+        <div style="width:200px;">
+          <label>アンカー距離 左(-)(m)</label>
+          <input id="xsAnchorLeft" type="number" step="0.001" min="0" value="${Number(state.cross.taper?.anchorLeft ?? 3.0).toFixed(3)}" />
+        </div>
+        <div style="flex:1; min-width:260px;">
+          <div class="mini">例外測点の最外端距離を制御点として幅員を線形補間し、アンカーより外側の距離をシフトして割付します（左右独立）。</div>
+        </div>
       </div>
-      <div>
-        <button class="btn" id="addExtras_cross">＋ 追加</button>
-        <div style="height:10px;"></div>
-        <button class="btn btn-ghost" id="clearExtras_cross">横断追加を全クリア</button>
+
+      <div class="grid grid-2" style="margin-top:10px;">
+        <div>
+          <div class="pill">右側（+） 共通（全測点）</div>
+          <div style="overflow:auto; margin-top:8px;">
+            <table>
+              <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>勾配(%)</th><th class="right">ΔZ(m)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
+              <tbody>${crossRowsHtml("common", "right")}</tbody>
+            </table>
+          </div>
+          <div class="row">
+            <div style="flex:1; min-width:160px;"><button class="btn" id="addCrossSeg_right">＋ 右側区間を追加</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="exampleCrossSeg_right">例を入れる</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="clearCrossSeg_right">右側を全クリア</button></div>
+          </div>
+          <div class="mini">最外端：+${cr.lastEnd.toFixed(3)} m / Z=${cr.lastZ.toFixed(3)} m</div>
+          ${warnHtml(cr.warnings)}
+        </div>
+
+        <div>
+          <div class="pill">左側（-） 共通（全測点）</div>
+          <div style="overflow:auto; margin-top:8px;">
+            <table>
+              <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>勾配(%)</th><th class="right">ΔZ(m)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
+              <tbody>${crossRowsHtml("common", "left")}</tbody>
+            </table>
+          </div>
+          <div class="row">
+            <div style="flex:1; min-width:160px;"><button class="btn" id="addCrossSeg_left">＋ 左側区間を追加</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="exampleCrossSeg_left">例を入れる</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="clearCrossSeg_left">左側を全クリア</button></div>
+          </div>
+          <div class="mini">最外端：-${cl.lastEnd.toFixed(3)} m / Z=${cl.lastZ.toFixed(3)} m</div>
+          ${warnHtml(cl.warnings)}
+        </div>
       </div>
+
+      <div class="sep"></div>
+      <div class="mini">例：中心→3.000m -2.000% / 3.000→4.500m 0.000% / 4.500→5.000m -1.000%</div>
+
+      <div class="sep"></div>
+      <h2 style="margin-top:0;">横断：測点別（例外設定）</h2>
+      <div class="mini">通常は「共通（全測点）」が適用されます。勾配変化点が必要な測点だけ、例外を作って編集できます。</div>
+
+      <div class="grid grid-3" style="margin-top:10px;">
+        <div>
+          <label>対象測点（m / k+rem）</label>
+          <input id="xsOverrideSta" type="text" placeholder="例：100.000 / 5+0.000" />
+          <div class="mini">pitch=${pitch}m</div>
+        </div>
+        <div>
+          <label>既存の例外</label>
+          <select id="xsOverrideSel">
+            <option value="">（選択なし）</option>
+            ${ovOptions}
+          </select>
+          <div class="mini">選択すると編集対象になります</div>
+        </div>
+        <div>
+          <label>操作</label>
+          <button class="btn" id="xsOverrideAddOrSelect">＋ 作成/選択</button>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ghost" id="xsOverrideDelete" ${hasSel?"":"disabled"}>例外を削除（共通に戻す）</button>
+        </div>
+      </div>
+
+      ${hasSel ? `
+        <div class="row" style="margin-top:10px; align-items:flex-end;">
+          <div style="width:220px;">
+            <label>例外 最外端距離 右(+)(m)</label>
+            <input id="ovrWidthRight" type="number" step="0.001" min="0" value="${or.lastEnd.toFixed(3)}" />
+          </div>
+          <div style="width:220px;">
+            <label>例外 最外端距離 左(-)(m)</label>
+            <input id="ovrWidthLeft" type="number" step="0.001" min="0" value="${ol.lastEnd.toFixed(3)}" />
+          </div>
+          <div style="flex:1; min-width:260px;">
+            <label>幅員適用（共通形状→アンカー以外を自動シフト）</label>
+            <button class="btn" id="applyOvrWidth">この例外に幅員を適用</button>
+            <div class="mini" style="margin-top:6px;">※左右独立で適用。既存の例外形状を上書きします。</div>
+          </div>
+        </div>
+
+        <div class="grid grid-2" style="margin-top:10px;">
+          <div>
+            <div class="pill">右側（+） 例外 @ ${metersToStaPitch(Number(selKey), pitch, 3)} (${selKey}m)</div>
+            <div style="overflow:auto; margin-top:8px;">
+              <table>
+                <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>勾配(%)</th><th class="right">ΔZ(m)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
+                <tbody>${crossRowsHtml("ovr", "right", selKey)}</tbody>
+              </table>
+            </div>
+            <div class="row">
+              <div style="flex:1; min-width:160px;"><button class="btn" id="addCrossSeg_ovr_right">＋ 右側区間を追加</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="exampleCrossSeg_ovr_right">例を入れる</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="clearCrossSeg_ovr_right">右側を全クリア</button></div>
+            </div>
+            <div class="mini">最外端：+${or.lastEnd.toFixed(3)} m / Z=${or.lastZ.toFixed(3)} m</div>
+            ${warnHtml(or.warnings)}
+          </div>
+
+          <div>
+            <div class="pill">左側（-） 例外 @ ${metersToStaPitch(Number(selKey), pitch, 3)} (${selKey}m)</div>
+            <div style="overflow:auto; margin-top:8px;">
+              <table>
+                <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>勾配(%)</th><th class="right">ΔZ(m)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
+                <tbody>${crossRowsHtml("ovr", "left", selKey)}</tbody>
+              </table>
+            </div>
+            <div class="row">
+              <div style="flex:1; min-width:160px;"><button class="btn" id="addCrossSeg_ovr_left">＋ 左側区間を追加</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="exampleCrossSeg_ovr_left">例を入れる</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="clearCrossSeg_ovr_left">左側を全クリア</button></div>
+            </div>
+            <div class="mini">最外端：-${ol.lastEnd.toFixed(3)} m / Z=${ol.lastZ.toFixed(3)} m</div>
+            ${warnHtml(ol.warnings)}
+          </div>
+        </div>
+      ` : `<div class="mini" style="margin-top:10px;">（例外は未選択です。必要な測点を作成/選択してください）</div>`}
+
+
+
+      <div class="sep"></div>
+      <h2 style="margin-top:0;">簡易横断図（プレビュー）</h2>
+      <div class="mini">測点を指定すると、拡幅割付（テーパ）を反映した横断形状を表示します。</div>
+
+      <div class="row" style="margin-top:10px; align-items:flex-end;">
+        <div style="width:260px;">
+          <label>プレビュー測点（m / k+rem）</label>
+          <input id="xsPreviewSta" type="text" placeholder="例：110.000 / 1+10.000" value="${(state.cross.ui.previewTok||"")}" />
+          <div class="mini">pitch=${pitch}m</div>
+        </div>
+        <div style="width:220px;">
+          <label>操作</label>
+          <button class="btn" id="xsPreviewShow">表示</button>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ghost" id="xsPreviewUseSelected" ${hasSel?"":"disabled"}>選択中の例外を表示</button>
+        </div>
+        <div style="flex:1; min-width:260px;">
+          <div class="mini" id="xsPreviewInfo"></div>
+        </div>
+      </div>
+
+      <div style="overflow:auto; margin-top:10px;">
+        <canvas id="xsCanvas" width="1000" height="260" style="width:100%; max-width:1000px; border:1px solid var(--line); border-radius:12px; background:#fff;"></canvas>
+      </div>
+      <div class="mini" id="xsPreviewTable" style="margin-top:10px;"></div>
+
     </div>
 
-    ${state.extraStations.cross.length ? `
-    <div style="overflow:auto; margin-top:10px;">
-      <table>
-        <thead><tr><th>ID</th><th>測点表示</th><th>追加距離(m)</th><th class="right">削除</th></tr></thead>
-        <tbody>
-          ${state.extraStations.cross.map(x=>`
-            <tr>
-              <td>${x.id}</td>
-              <td>${metersToStaPitch(x.m, pitch, 3)}</td>
-              <td><input data-ex-group="cross" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
-              <td class="right"><button class="btn btn-ghost" data-ex-group="cross" data-ex-del="${x.id}">削除</button></td>
-            </tr>
-          `).join("")}
-        </tbody>
-      </table>
-    </div>` : `<div class="mini" style="margin-top:10px;">（まだ横断の追加測点はありません）</div>`}
-  </div>
-`;
+    <div class="card">
+      <h2>横断（追加測点のみ）</h2>
+      <div class="grid grid-3">
+        <div class="mini">
+          ここは「横断追加測点（中心線の測点）」の管理だけ。<br/>
+          ここで追加した測点は最終CSVに統合します。
+        </div>
+        <div>
+          <label>横断：追加測点 追加入力</label>
+          <textarea id="extraTokens_cross" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
+        </div>
+        <div>
+          <button class="btn" id="addExtras_cross">＋ 追加</button>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ghost" id="clearExtras_cross">横断追加を全クリア</button>
+        </div>
+      </div>
 
-bindExtraUI("cross", viewCross, pitch);
+      ${state.extraStations.cross.length ? `
+      <div style="overflow:auto; margin-top:10px;">
+        <table>
+          <thead><tr><th>ID</th><th>測点表示</th><th>追加距離(m)</th><th class="right">削除</th></tr></thead>
+          <tbody>
+            ${state.extraStations.cross.map(x=>`
+              <tr>
+                <td>${x.id}</td>
+                <td>${metersToStaPitch(x.m, pitch, 3)}</td>
+                <td><input data-ex-group="cross" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
+                <td class="right"><button class="btn btn-ghost" data-ex-group="cross" data-ex-del="${x.id}">削除</button></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>` : `<div class="mini" style="margin-top:10px;">（まだ横断の追加測点はありません）</div>`}
+    </div>
+  `;
+
+  // 一括距離
+  const bulkBtn = document.getElementById("applyBulkCrossEnd");
+  if (bulkBtn) {
+    bulkBtn.onclick = ()=>{
+      const er = parseFloat(document.getElementById("bulkCrossEnd_right").value);
+      const el = parseFloat(document.getElementById("bulkCrossEnd_left").value);
+      const affect = !!document.getElementById("bulkAffectOverrides").checked;
+      applyCrossOuterEnd(er, el, affect);
+      saveState();
+      render();
+    };
+  }
+
+  // 例外：選択
+  const selEl = document.getElementById("xsOverrideSel");
+  if (selEl) {
+    selEl.value = selKey;
+    selEl.onchange = (e)=>{
+      state.cross.ui.selectedStaKey = e.target.value || "";
+      saveState();
+      render();
+    };
+  }
+
+  // 例外：作成/選択
+  const addSelBtn = document.getElementById("xsOverrideAddOrSelect");
+  if (addSelBtn) {
+    addSelBtn.onclick = ()=>{
+      const pitchNow = Math.max(1, Math.floor(state.staPitch||1));
+      const sel = (document.getElementById("xsOverrideSel")?.value || "").trim();
+      if (sel) {
+        state.cross.ui.selectedStaKey = sel;
+        saveState();
+        render();
+        return;
+      }
+      const tok = (document.getElementById("xsOverrideSta")?.value || "").trim();
+      if (!tok) { alert("測点を入力してください"); return; }
+      let m;
+      try {
+        m = parseTokenToM(tok, pitchNow);
+      } catch(e) {
+        alert("測点が不正です: " + (e.message||e));
+        return;
+      }
+      const key = Number(m.toFixed(3));
+      const k = key.toFixed(3);
+      ensureCrossOverride(k);
+      state.cross.ui.selectedStaKey = k;
+      saveState();
+      render();
+    };
+  }
+
+  // 例外：削除
+  const delBtn = document.getElementById("xsOverrideDelete");
+  if (delBtn) {
+    delBtn.onclick = ()=>{
+      const k = state.cross.ui.selectedStaKey;
+      if (!k) return;
+      if (!confirm(`例外（${k}m）を削除して共通に戻します。よいですか？`)) return;
+      delete state.cross.overrides[k];
+      state.cross.ui.selectedStaKey = "";
+      saveState();
+      render();
+    };
+  }
+
+
+  bindCrossSlopeUI(viewCross);
+
+  // taper settings
+  const cbTaper = document.getElementById('xsTaperEnabled');
+  if (cbTaper) {
+    cbTaper.onchange = ()=>{ ensureCrossState(); state.cross.taper.enabled = !!cbTaper.checked; saveState(); render(); };
+  }
+  const inAR = document.getElementById('xsAnchorRight');
+  if (inAR) {
+    inAR.oninput = (e)=>{ ensureCrossState(); state.cross.taper.anchorRight = parseFloat(e.target.value)||0; saveState(); };
+  }
+  const inAL = document.getElementById('xsAnchorLeft');
+  if (inAL) {
+    inAL.oninput = (e)=>{ ensureCrossState(); state.cross.taper.anchorLeft = parseFloat(e.target.value)||0; saveState(); };
+  }
+
+  // override width apply
+  const btnApplyWidth = document.getElementById('applyOvrWidth');
+  if (btnApplyWidth) {
+    btnApplyWidth.onclick = ()=>{
+      const k = state.cross.ui.selectedStaKey;
+      if (!k) return;
+      const wr = parseFloat(document.getElementById('ovrWidthRight')?.value);
+      const wl = parseFloat(document.getElementById('ovrWidthLeft')?.value);
+      if ((!Number.isFinite(wr) || wr<=0) && (!Number.isFinite(wl) || wl<=0)) { alert('幅員を入力してください'); return; }
+      if (!confirm('共通形状から自動生成して、現在の例外形状を上書きします。よいですか？')) return;
+      setOverrideWidthFromCommon(k, wr, wl);
+      saveState();
+      render();
+    };
+  }
+
+  // preview
+  const drawPreview = (tok)=>{
+    const infoEl = document.getElementById('xsPreviewInfo');
+    const tblEl = document.getElementById('xsPreviewTable');
+    const canvas = document.getElementById('xsCanvas');
+    if (!canvas) return;
+
+    const pitchNow = Math.max(1, Math.floor(state.staPitch||1));
+    let m;
+    try {
+      m = parseTokenToM(String(tok||'').trim(), pitchNow);
+    } catch(e) {
+      if (infoEl) infoEl.textContent = '測点が不正です: ' + (e.message||e);
+      return;
+    }
+    m = clamp(m, 0, res.total||0);
+
+    const R = getEffectiveCrossSegsAt(m, 'right');
+    const L = getEffectiveCrossSegsAt(m, 'left');
+
+    const rCalc = computeCrossRowsFromSegs(R.segs);
+    const lCalc = computeCrossRowsFromSegs(L.segs);
+
+    const ptsR = [{x:0,z:0}];
+    for (const row of rCalc.rows) ptsR.push({x: row.end, z: row.zEnd});
+    const ptsL = [{x:0,z:0}];
+    for (const row of lCalc.rows) ptsL.push({x: -row.end, z: row.zEnd});
+
+    const poly = [...ptsL.slice(1).reverse(), {x:0,z:0}, ...ptsR.slice(1)];
+
+    const labels = [
+      { x: -lCalc.lastEnd, z: lCalc.lastZ, text: `L=${lCalc.lastEnd.toFixed(3)}m` },
+      { x:  rCalc.lastEnd, z: rCalc.lastZ, text: `R=${rCalc.lastEnd.toFixed(3)}m` },
+    ];
+
+    drawCrossPreviewCanvas(canvas, poly, labels);
+
+    if (infoEl) {
+      const sLabel = metersToStaPitch(m, pitchNow, 3);
+      const modeR = `${R.info.source}:${R.info.mode}`;
+      const modeL = `${L.info.source}:${L.info.mode}`;
+      infoEl.textContent = `${sLabel} (${m.toFixed(3)}m)  右(+): ${rCalc.lastEnd.toFixed(3)}m [${modeR}] / 左(-): ${lCalc.lastEnd.toFixed(3)}m [${modeL}]`;
+    }
+
+    if (tblEl) {
+      const mk = m.toFixed(3);
+      const rowsToHtml = (calc, sideName)=>{
+        const lines = calc.rows.map(r=>`${r.start.toFixed(3)}→${r.end.toFixed(3)} : ${r.slopePct.toFixed(3)}% (Z=${r.zEnd.toFixed(3)})`);
+        return `<div style="margin-top:6px;"><b>${sideName}</b><br/>${lines.join('<br/>')}</div>`;
+      };
+      tblEl.innerHTML = rowsToHtml(lCalc,'左(-)') + rowsToHtml(rCalc,'右(+)');
+    }
+  };
+
+  const inpPrev = document.getElementById('xsPreviewSta');
+  const btnPrev = document.getElementById('xsPreviewShow');
+  const btnUseSel = document.getElementById('xsPreviewUseSelected');
+
+  const runPrev = ()=>{
+    const tok = (inpPrev?.value||'').trim();
+    ensureCrossState();
+    state.cross.ui.previewTok = tok;
+    saveState();
+    drawPreview(tok);
+  };
+
+  if (btnPrev) btnPrev.onclick = runPrev;
+  if (inpPrev) inpPrev.onchange = runPrev;
+
+  if (btnUseSel) {
+    btnUseSel.onclick = ()=>{
+      const k = state.cross.ui.selectedStaKey;
+      if (!k) return;
+      if (inpPrev) inpPrev.value = k;
+      runPrev();
+    };
+  }
+
+  // 初期描画
+  if (inpPrev && (!inpPrev.value || !inpPrev.value.trim())) {
+    const k = state.cross.ui.selectedStaKey;
+    inpPrev.value = k || '0.000';
+    ensureCrossState();
+    state.cross.ui.previewTok = inpPrev.value;
+    saveState();
+  }
+  if (inpPrev) drawPreview(inpPrev.value);
+
+  bindExtraUI("cross", viewCross, pitch);
+
 
   /* -------- OUTPUT -------- */
   const stepInt = Math.max(1, Math.floor(state.outputStep||1));
@@ -1937,7 +2975,7 @@ bindExtraUI("cross", viewCross, pitch);
         </div>
       </div>
       <div class="mini" style="margin-top:10px;">
-        更新が反映されないとき：<b>sw.js の CACHE_NAME を v3→v4</b> に上げると確実です。
+        更新が反映されないとき：<b>sw.js の CACHE_NAME を v7（例：road-align-v7）</b> に上げると確実です。
       </div>
     </div>
   `;
