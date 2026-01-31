@@ -1,3 +1,4 @@
+<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
@@ -629,7 +630,7 @@ const ensureCrossState = ()=>{
   if (!Number.isFinite(Number(state.cross.taper.anchorRight))) state.cross.taper.anchorRight = 3.000;
   if (!Number.isFinite(Number(state.cross.taper.anchorLeft))) state.cross.taper.anchorLeft = 3.000;
 
-  if (typeof state.cross.ui.previewTok !== 'string') state.cross.ui.previewTok = ;
+  if (typeof state.cross.ui.previewTok !== 'string') state.cross.ui.previewTok = "";
 
   const ensureSide = (obj)=>{
     obj = (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : { segs: [], nextSegId: 1 };
@@ -1920,17 +1921,34 @@ const render = () => {
     ];
     state.useIpCount=3;
     state.curveSettings=[{ id:1, ipName:"IP2", R:200, A1:100, A2:100, Ls:40, direction:"auto" }];
-    state.extraStations=[];
-    state.nextExtraId=1;
 
-    state.profile.startSta = 0.0;
-    state.profile.startZ = 0.0;
-    state.profile.rows = [
-      { id: 1, nextSta: 100.000, gradePct: 2.000, vcL: 60.000, vcYmax: null },
-      { id: 2, nextSta: 300.000, gradePct: -1.000, vcL: null,  vcYmax: 0.100 },
-      { id: 3, nextSta: 500.000, gradePct: 0.500, vcL: null, vcYmax: null },
+    // 追加測点（タブ別） ※新形式に合わせて初期化
+    state.extraStations = { plan: [], profile: [], cross: [], output: [] };
+    state.nextExtraId   = { plan: 1, profile: 1, cross: 1, output: 1 };
+
+    // 縦断（勾配区間 + 縦断曲線(VPI単位)） ※新形式に合わせて初期化
+    state.profile.enabled = true;
+    state.profile.startSta = 0.000;
+    state.profile.startZ   = 0.000;
+
+    state.profile.grades = [
+      { id: 1, nextSta: 100.000, gradePct:  2.000 },
+      { id: 2, nextSta: 300.000, gradePct: -1.000 },
+      { id: 3, nextSta: 500.000, gradePct:  0.500 },
     ];
-    state.profile.nextRowId = 4;
+    state.profile.nextGradeId = 4;
+
+    // VPI=次の測点（gradeの区切り）に紐付け
+    // L優先。Lが空なら ymax から L=8*ymax/|A| に換算（計算時）
+    state.profile.vcurves = [
+      { id: 1, vpiSta: 100.000, L: 60.000,  ymax: null  },
+      { id: 2, vpiSta: 300.000, L: null,    ymax: 0.100 },
+    ];
+    state.profile.nextVcurveId = 3;
+
+    // 旧フィールドが残っていたら掃除（念のため）
+    delete state.profile.rows;
+    delete state.profile.nextRowId;
 
     saveState(); render();
   };
@@ -2975,7 +2993,7 @@ bindExtraUI("profile", viewProfile, pitch);
         </div>
       </div>
       <div class="mini" style="margin-top:10px;">
-        更新が反映されないとき：<b>sw.js の CACHE_NAME を v7（例：road-align-v7）</b> に上げると確実です。
+        更新が反映されないとき：<b>sw.js の CACHE_NAME を v8（例：road-align-v8）</b> に上げると確実です。
       </div>
     </div>
   `;
@@ -3034,5 +3052,4 @@ render();
 </script>
 </body>
 </html>
-
 
