@@ -1,4 +1,4 @@
-const CACHE_NAME = "road-align-v13";
+const CACHE_NAME = 'road-align-v15';
 const ASSETS = ["./", "./index.html", "./manifest.json", "./sw.js"];
 
 self.addEventListener("install", (event) => {
