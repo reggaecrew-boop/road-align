@@ -107,25 +107,12 @@
 
       <div style="width:160px;">
         <label>測点表示ピッチ（整数m）</label>
-        <input id="staPitch" type="number" step="1" min="1" />
+        <input id="staPitch" type="text" inputmode="numeric" autocomplete="off" />
       </div>
 
       <div style="width:160px;">
         <label>出力間隔（整数m）</label>
-        <input id="outputStep" type="number" step="1" min="1" />
-      </div>
-
-      <div style="width:160px;">
-        <label>クロソイド ds(m)</label>
-        <input id="dsSpiral" type="number" step="0.1" />
-      </div>
-
-      <div style="width:170px;">
-        <label>クロソイド指定</label>
-        <select id="clothoidMode">
-          <option value="A">A値（A1/A2）</option>
-          <option value="L">Ls（長さ）</option>
-        </select>
+        <input id="outputStep" type="text" inputmode="numeric" autocomplete="off" />
       </div>
     </div>
 
@@ -174,7 +161,7 @@ let state = {
   useIpCount: 3,
 
   curveSettings: [
-    { id: 1, ipName: "IP2", R: 200, A1: 100, A2: 100, Ls: 40, direction: "auto" }
+    { id: 1, ipName: "IP2", R: 200, A1: 100, A2: 100, direction: "auto", ds: 0.5 }
   ],
 
   // 追加測点（タブ別）
@@ -515,7 +502,7 @@ const parseTokenToM = (token, pitch) => {
 const setOrNull = (v)=> {
   const t = String(v ?? "").trim();
   if (t === "") return null;
-  const n = parseFloat(t);
+  const n = parseFloat(t.replace(/,/g,"."));
   return Number.isFinite(n) ? n : null;
 };
 
@@ -581,12 +568,19 @@ const bindExtraUI = (groupKey, rootEl, pitch)=> {
   if (!rootEl) return;
   rootEl.querySelectorAll(`input[data-ex-group="${groupKey}"][data-ex-id]`).forEach(inp=>{
     const id = parseInt(inp.getAttribute("data-ex-id"),10);
-    inp.oninput = (e)=>{
+    const commit = (e)=>{
       const row = state.extraStations[groupKey].find(x=>x.id===id);
-      if (row) row.m = parseFloat(e.target.value)||0;
+      if (!row) return;
+      const t = String(e.target.value ?? "").trim();
+      if (t === "") { render(); return; }
+      const n = parseFloat(t.replace(/,/g,"."));
+      if (!Number.isFinite(n)) { render(); return; }
+      row.m = n;
       saveState();
       render();
     };
+    inp.onchange = commit;
+    inp.onblur = commit;
   });
   rootEl.querySelectorAll(`button[data-ex-del][data-ex-group="${groupKey}"]`).forEach(btn=>{
     const id = parseInt(btn.getAttribute("data-ex-del"),10);
@@ -1056,25 +1050,39 @@ const bindCrossSlopeUI = (rootEl)=>{
 
     rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-end]`).forEach(inp=>{
       const id = parseInt(inp.getAttribute('data-xs-id'),10);
-      inp.oninput = (e)=>{
+      const commit = (e)=>{
         const store = getCrossStore(scope, side, staKey);
         const r = (store.segs||[]).find(x=>x.id===id);
-        if (r) r.end = parseFloat(e.target.value)||0;
+        if (!r) return;
+        const t = String(e.target.value ?? "").trim();
+        if (t === "") { render(); return; }
+        const n = parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(n)) { render(); return; }
+        r.end = n;
         sortCrossSegs(scope, side, staKey);
         saveState();
         render();
       };
+      inp.onchange = commit;
+      inp.onblur = commit;
     });
 
     rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-slope]`).forEach(inp=>{
       const id = parseInt(inp.getAttribute('data-xs-id'),10);
-      inp.oninput = (e)=>{
+      const commit = (e)=>{
         const store = getCrossStore(scope, side, staKey);
         const r = (store.segs||[]).find(x=>x.id===id);
-        if (r) r.slopePct = parseFloat(e.target.value)||0;
+        if (!r) return;
+        const t = String(e.target.value ?? "").trim();
+        if (t === "") { render(); return; }
+        const n = parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(n)) { render(); return; }
+        r.slopePct = n;
         saveState();
         render();
       };
+      inp.onchange = commit;
+      inp.onblur = commit;
     });
 
     rootEl.querySelectorAll(`button[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-del]`).forEach(btn=>{
@@ -1455,7 +1463,7 @@ const computeAlignment = (ipPoints, curveSettings, dsSpiral, clothoidMode) => {
     let psiSC = psiTS;
 
     if (L1 > 0) {
-      const sp = new SegmentSpiral(curSta, curX, curY, psiTS, R, L1, turnSign, "in", dsSpiral);
+      const sp = new SegmentSpiral(curSta, curX, curY, psiTS, R, L1, turnSign, "in", (cs.ds ?? dsSpiral));
       segments.push(sp);
       curSta = sp.s1;
       const end = sp.endState();
@@ -1477,7 +1485,7 @@ const computeAlignment = (ipPoints, curveSettings, dsSpiral, clothoidMode) => {
     const staCS = curSta;
 
     if (L2 > 0) {
-      const sp = new SegmentSpiral(curSta, curX, curY, psiCS, R, L2, turnSign, "out", dsSpiral);
+      const sp = new SegmentSpiral(curSta, curX, curY, psiCS, R, L2, turnSign, "out", (cs.ds ?? dsSpiral));
       segments.push(sp);
       curSta = sp.s1;
       const end = sp.endState();
@@ -1698,8 +1706,6 @@ const render = () => {
   document.getElementById("coordDecimals").value = String(state.coordDecimals);
   document.getElementById("staPitch").value = state.staPitch;
   document.getElementById("outputStep").value = state.outputStep;
-  document.getElementById("dsSpiral").value = state.dsSpiral;
-  document.getElementById("clothoidMode").value = state.clothoidMode;
 
   const d = Math.max(0, Math.min(4, parseInt(state.coordDecimals, 10) || 3));
   const { workPoints, res } = computeAll();
@@ -1713,15 +1719,15 @@ const render = () => {
         <div>
           <div class="pill">BP</div>
           <div class="grid grid-2" style="margin-top:8px;">
-            <div><label>N</label><input id="bpN" type="number" step="0.001" /></div>
-            <div><label>E</label><input id="bpE" type="number" step="0.001" /></div>
+            <div><label>N</label><input id="bpN" type="text" inputmode="decimal" autocomplete="off" /></div>
+            <div><label>E</label><input id="bpE" type="text" inputmode="decimal" autocomplete="off" /></div>
           </div>
         </div>
         <div>
           <div class="pill">EP</div>
           <div class="grid grid-2" style="margin-top:8px;">
-            <div><label>N</label><input id="epN" type="number" step="0.001" /></div>
-            <div><label>E</label><input id="epE" type="number" step="0.001" /></div>
+            <div><label>N</label><input id="epN" type="text" inputmode="decimal" autocomplete="off" /></div>
+            <div><label>E</label><input id="epE" type="text" inputmode="decimal" autocomplete="off" /></div>
           </div>
         </div>
       </div>
@@ -1759,8 +1765,8 @@ const render = () => {
             ${state.ipPoints.map(p=>`
               <tr>
                 <td><input data-ip-name="${p.id}" value="${p.name}" /></td>
-                <td><input data-ip-n="${p.id}" type="number" step="0.001" value="${p.N}" /></td>
-                <td><input data-ip-e="${p.id}" type="number" step="0.001" value="${p.E}" /></td>
+                <td><input data-ip-n="${p.id}" type="text" inputmode="decimal" autocomplete="off" value="${p.N}" /></td>
+                <td><input data-ip-e="${p.id}" type="text" inputmode="decimal" autocomplete="off" value="${p.E}" /></td>
               </tr>`).join("")}
           </tbody>
         </table>
@@ -1772,13 +1778,13 @@ const render = () => {
       <div class="grid grid-3">
         <div class="mini">direction: auto/left/right/none、R>0 のとき曲線として扱います</div>
         <div><button class="btn" id="addCurve">+ 曲線追加</button></div>
-        <div class="mini">A指定：L=A²/R（A1/A2） / L指定：Lsを使用</div>
+        <div class="mini">A指定：L1=A1²/R、L2=A2²/R（A2空欄ならA1と同じ）</div>
       </div>
 
       <div style="overflow:auto; margin-top:10px;">
         <table>
           <thead>
-            <tr><th>対象IP</th><th>direction</th><th>R</th><th>A1</th><th>A2</th><th>Ls</th><th class="right">削除</th></tr>
+            <tr><th>対象IP</th><th>direction</th><th>R</th><th>A1(起点)</th><th>A2(終点)</th><th class="right">L1(m)</th><th class="right">L2(m)</th><th>ds(内部刻みm)</th><th class="right">削除</th></tr>
           </thead>
           <tbody>
             ${state.curveSettings.map(c=>`
@@ -1793,10 +1799,13 @@ const render = () => {
                     ${["auto","left","right","none"].map(d=>`<option value="${d}" ${d===c.direction?"selected":""}>${d}</option>`).join("")}
                   </select>
                 </td>
-                <td><input data-c-r="${c.id}" type="number" step="0.001" value="${c.R}" /></td>
-                <td><input data-c-a1="${c.id}" type="number" step="0.001" value="${c.A1 ?? 0}" /></td>
-                <td><input data-c-a2="${c.id}" type="number" step="0.001" value="${c.A2 ?? (c.A1 ?? 0)}" /></td>
-                <td><input data-c-ls="${c.id}" type="number" step="0.001" value="${c.Ls ?? 0}" /></td>
+                <td><input data-c-r="${c.id}" type="text" inputmode="decimal" autocomplete="off" value="${c.R ?? ""}" /></td>
+                <td><input data-c-a1="${c.id}" type="text" inputmode="decimal" autocomplete="off" value="${c.A1 ?? ""}" /></td>
+                <td><input data-c-a2="${c.id}" type="text" inputmode="decimal" autocomplete="off" value="${((c.A2 ?? c.A1) ?? "")}" /></td>
+                <td class="right">${(+c.R>0 && +c.A1>0) ? (((+c.A1)*(+c.A1))/(+c.R)).toFixed(3) : ""}</td>
+                <td class="right">${(+c.R>0 && +((c.A2 ?? c.A1) ?? 0)>0) ? (((+((c.A2 ?? c.A1) ?? 0))*(+((c.A2 ?? c.A1) ?? 0)))/(+c.R)).toFixed(3) : ""}</td>
+
+<td><input data-c-ds="${c.id}" type="text" inputmode="decimal" autocomplete="off" value="${c.ds ?? ""}" /></td>
                 <td class="right"><button class="btn btn-ghost" data-c-del="${c.id}">削除</button></td>
               </tr>`).join("")}
           </tbody>
@@ -1876,22 +1885,81 @@ const render = () => {
   `;
 
   /* header bind */
-  document.getElementById("projectName").oninput = (e)=>{ state.projectName = e.target.value; saveState(); render(); };
+  const inProjectName = document.getElementById("projectName");
+  const commitProjectName = ()=>{ state.projectName = inProjectName.value; saveState(); render(); };
+  inProjectName.onchange = commitProjectName;
+  inProjectName.onblur = commitProjectName;
   document.getElementById("coordDecimals").onchange = (e)=>{ state.coordDecimals = parseInt(e.target.value,10)||3; saveState(); render(); };
-  document.getElementById("staPitch").oninput = (e)=>{ state.staPitch = Math.max(1, parseInt(e.target.value,10)||20); saveState(); render(); };
-  document.getElementById("outputStep").oninput = (e)=>{ state.outputStep = Math.max(1, parseInt(e.target.value,10)||20); saveState(); render(); };
-  document.getElementById("dsSpiral").oninput = (e)=>{ state.dsSpiral = Math.max(0.001, parseFloat(e.target.value)||0.5); saveState(); render(); };
-  document.getElementById("clothoidMode").onchange = (e)=>{ state.clothoidMode = e.target.value; saveState(); render(); };
+  const inStaPitch = document.getElementById("staPitch");
+  const commitStaPitch = ()=>{
+    const t = String(inStaPitch.value ?? "").trim();
+    const n = parseInt(t,10);
+    if (!Number.isFinite(n) || n < 1) { render(); return; }
+    state.staPitch = n;
+    saveState(); render();
+  };
+  inStaPitch.onchange = commitStaPitch;
+  inStaPitch.onblur = commitStaPitch;
+  const inOutputStep = document.getElementById("outputStep");
+  const commitOutputStep = ()=>{
+    const t = String(inOutputStep.value ?? "").trim();
+    const n = parseInt(t,10);
+    if (!Number.isFinite(n) || n < 1) { render(); return; }
+    state.outputStep = n;
+    saveState(); render();
+  };
+  inOutputStep.onchange = commitOutputStep;
+  inOutputStep.onblur = commitOutputStep;
 
   /* BP/EP bind */
   document.getElementById("bpN").value = state.bp.N;
   document.getElementById("bpE").value = state.bp.E;
   document.getElementById("epN").value = state.ep.N;
   document.getElementById("epE").value = state.ep.E;
-  document.getElementById("bpN").oninput = (e)=>{ state.bp.N = parseFloat(e.target.value)||0; saveState(); render(); };
-  document.getElementById("bpE").oninput = (e)=>{ state.bp.E = parseFloat(e.target.value)||0; saveState(); render(); };
-  document.getElementById("epN").oninput = (e)=>{ state.ep.N = parseFloat(e.target.value)||0; saveState(); render(); };
-  document.getElementById("epE").oninput = (e)=>{ state.ep.E = parseFloat(e.target.value)||0; saveState(); render(); };
+  const in_bpN = document.getElementById("bpN");
+const commit_bpN = ()=>{
+  const t = String(in_bpN.value ?? "").trim();
+  if (t === "") { render(); return; }
+  const n = parseFloat(t.replace(/,/g,"."));
+  if (!Number.isFinite(n)) { render(); return; }
+  state.bp.N = n;
+  saveState(); render();
+};
+in_bpN.onchange = commit_bpN;
+in_bpN.onblur = commit_bpN;
+  const in_bpE = document.getElementById("bpE");
+const commit_bpE = ()=>{
+  const t = String(in_bpE.value ?? "").trim();
+  if (t === "") { render(); return; }
+  const n = parseFloat(t.replace(/,/g,"."));
+  if (!Number.isFinite(n)) { render(); return; }
+  state.bp.E = n;
+  saveState(); render();
+};
+in_bpE.onchange = commit_bpE;
+in_bpE.onblur = commit_bpE;
+  const in_epN = document.getElementById("epN");
+const commit_epN = ()=>{
+  const t = String(in_epN.value ?? "").trim();
+  if (t === "") { render(); return; }
+  const n = parseFloat(t.replace(/,/g,"."));
+  if (!Number.isFinite(n)) { render(); return; }
+  state.ep.N = n;
+  saveState(); render();
+};
+in_epN.onchange = commit_epN;
+in_epN.onblur = commit_epN;
+  const in_epE = document.getElementById("epE");
+const commit_epE = ()=>{
+  const t = String(in_epE.value ?? "").trim();
+  if (t === "") { render(); return; }
+  const n = parseFloat(t.replace(/,/g,"."));
+  if (!Number.isFinite(n)) { render(); return; }
+  state.ep.E = n;
+  saveState(); render();
+};
+in_epE.onchange = commit_epE;
+in_epE.onblur = commit_epE;
 
   const useIp = document.getElementById("useIpCount");
   useIp.value = Math.max(0, Math.min(state.useIpCount, state.ipPoints.length));
@@ -1921,34 +1989,17 @@ const render = () => {
     ];
     state.useIpCount=3;
     state.curveSettings=[{ id:1, ipName:"IP2", R:200, A1:100, A2:100, Ls:40, direction:"auto" }];
+    state.extraStations=[];
+    state.nextExtraId=1;
 
-    // 追加測点（タブ別） ※新形式に合わせて初期化
-    state.extraStations = { plan: [], profile: [], cross: [], output: [] };
-    state.nextExtraId   = { plan: 1, profile: 1, cross: 1, output: 1 };
-
-    // 縦断（勾配区間 + 縦断曲線(VPI単位)） ※新形式に合わせて初期化
-    state.profile.enabled = true;
-    state.profile.startSta = 0.000;
-    state.profile.startZ   = 0.000;
-
-    state.profile.grades = [
-      { id: 1, nextSta: 100.000, gradePct:  2.000 },
-      { id: 2, nextSta: 300.000, gradePct: -1.000 },
-      { id: 3, nextSta: 500.000, gradePct:  0.500 },
+    state.profile.startSta = 0.0;
+    state.profile.startZ = 0.0;
+    state.profile.rows = [
+      { id: 1, nextSta: 100.000, gradePct: 2.000, vcL: 60.000, vcYmax: null },
+      { id: 2, nextSta: 300.000, gradePct: -1.000, vcL: null,  vcYmax: 0.100 },
+      { id: 3, nextSta: 500.000, gradePct: 0.500, vcL: null, vcYmax: null },
     ];
-    state.profile.nextGradeId = 4;
-
-    // VPI=次の測点（gradeの区切り）に紐付け
-    // L優先。Lが空なら ymax から L=8*ymax/|A| に換算（計算時）
-    state.profile.vcurves = [
-      { id: 1, vpiSta: 100.000, L: 60.000,  ymax: null  },
-      { id: 2, vpiSta: 300.000, L: null,    ymax: 0.100 },
-    ];
-    state.profile.nextVcurveId = 3;
-
-    // 旧フィールドが残っていたら掃除（念のため）
-    delete state.profile.rows;
-    delete state.profile.nextRowId;
+    state.profile.nextRowId = 4;
 
     saveState(); render();
   };
@@ -1968,27 +2019,52 @@ const render = () => {
 
   viewPlan.querySelectorAll("input[data-ip-name]").forEach(inp=>{
     const id = parseInt(inp.getAttribute("data-ip-name"),10);
-    inp.oninput = (e)=>{
+    const commit = (e)=>{
       const p = state.ipPoints.find(x=>x.id===id);
-      if (p) p.name = e.target.value || p.name;
+      if (!p) return;
+      const t = String(e.target.value ?? "").trim();
+      if (t === "") { render(); return; }
+      if (state.ipPoints.some(x=>x.id!==id && x.name===t)) { alert("IP名が重複しています"); render(); return; }
+      const old = p.name;
+      if (t !== old) {
+        p.name = t;
+        // 曲線設定の参照も追随
+        state.curveSettings.forEach(c=>{ if(c.ipName===old) c.ipName = t; });
+      }
       saveState(); render();
     };
+    inp.onchange = commit;
+    inp.onblur = commit;
   });
   viewPlan.querySelectorAll("input[data-ip-n]").forEach(inp=>{
     const id = parseInt(inp.getAttribute("data-ip-n"),10);
-    inp.oninput = (e)=>{
+    const commit = (e)=>{
       const p = state.ipPoints.find(x=>x.id===id);
-      if (p) p.N = parseFloat(e.target.value)||0;
+      if (!p) return;
+      const t = String(e.target.value ?? "").trim();
+      if (t === "") { render(); return; }
+      const n = parseFloat(t.replace(/,/g,"."));
+      if (!Number.isFinite(n)) { render(); return; }
+      p.N = n;
       saveState(); render();
     };
+    inp.onchange = commit;
+    inp.onblur = commit;
   });
   viewPlan.querySelectorAll("input[data-ip-e]").forEach(inp=>{
     const id = parseInt(inp.getAttribute("data-ip-e"),10);
-    inp.oninput = (e)=>{
+    const commit = (e)=>{
       const p = state.ipPoints.find(x=>x.id===id);
-      if (p) p.E = parseFloat(e.target.value)||0;
+      if (!p) return;
+      const t = String(e.target.value ?? "").trim();
+      if (t === "") { render(); return; }
+      const n = parseFloat(t.replace(/,/g,"."));
+      if (!Number.isFinite(n)) { render(); return; }
+      p.E = n;
       saveState(); render();
     };
+    inp.onchange = commit;
+    inp.onblur = commit;
   });
 
   document.getElementById("addCurve").onclick = ()=>{
@@ -2016,22 +2092,32 @@ const render = () => {
     };
   });
 
-  const bindNum = (attr, key)=>{
-    viewPlan.querySelectorAll(`input[${attr}]`).forEach(inp=>{
-      const id = parseInt(inp.getAttribute(attr),10);
-      inp.oninput = (e)=>{
-        const c = state.curveSettings.find(x=>x.id===id);
-        if (c) c[key] = parseFloat(e.target.value)||0;
-        saveState(); render();
-      };
-    });
-  };
-  bindNum("data-c-r","R");
-  bindNum("data-c-a1","A1");
-  bindNum("data-c-a2","A2");
-  bindNum("data-c-ls","Ls");
-
-  viewPlan.querySelectorAll("button[data-c-del]").forEach(btn=>{
+  const bindNum = (attr, key, opt={ allowNull:true, min:null })=>{
+  viewPlan.querySelectorAll(`input[${attr}]`).forEach(inp=>{
+    const id = parseInt(inp.getAttribute(attr),10);
+    const commit = (e)=>{
+      const c = state.curveSettings.find(x=>x.id===id);
+      if (!c) return;
+      const t = String(e.target.value ?? "").trim();
+      if (t === "") {
+        if (opt.allowNull) c[key] = null;
+        render(); return;
+      }
+      const n = parseFloat(t.replace(/,/g,"."));
+      if (!Number.isFinite(n)) { render(); return; }
+      if (opt.min != null && n < opt.min) { render(); return; }
+      c[key] = n;
+      saveState(); render();
+    };
+    inp.onchange = commit;
+    inp.onblur = commit;
+  });
+};
+bindNum("data-c-r","R", {allowNull:true, min:null});
+bindNum("data-c-a1","A1", {allowNull:true, min:null});
+bindNum("data-c-a2","A2", {allowNull:true, min:null});
+bindNum("data-c-ds","ds", {allowNull:true, min:0.001});
+viewPlan.querySelectorAll("button[data-c-del]").forEach(btn=>{
     const id = parseInt(btn.getAttribute("data-c-del"),10);
     btn.onclick = ()=>{
       state.curveSettings = state.curveSettings.filter(c=>c.id!==id);
@@ -2042,7 +2128,17 @@ const render = () => {
   document.getElementById("plotStep").value = state.plotStep;
   document.getElementById("showKeypoints").checked = !!state.showKeypoints;
   document.getElementById("showArrow").checked = !!state.showArrow;
-  document.getElementById("plotStep").oninput = (e)=>{ state.plotStep = Math.max(0.1, parseFloat(e.target.value)||5); saveState(); render(); };
+  const inPlotStep = document.getElementById("plotStep");
+  const commitPlotStep = ()=>{
+    const t = String(inPlotStep.value ?? "").trim();
+    if (t === "") { render(); return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { render(); return; }
+    state.plotStep = Math.max(0.1, n);
+    saveState(); render();
+  };
+  inPlotStep.onchange = commitPlotStep;
+  inPlotStep.onblur = commitPlotStep;
   document.getElementById("showKeypoints").onchange = (e)=>{ state.showKeypoints = !!e.target.checked; saveState(); render(); };
   document.getElementById("showArrow").onchange = (e)=>{ state.showArrow = !!e.target.checked; saveState(); render(); };
 
@@ -2227,8 +2323,28 @@ viewProfile.innerHTML = `
 
 document.getElementById("profEnabled").checked = !!prof.enabled;
 document.getElementById("profEnabled").onchange = (e)=>{ state.profile.enabled = !!e.target.checked; saveState(); render(); };
-document.getElementById("startSta").onchange = (e)=>{ state.profile.startSta = parseFloat(e.target.value)||0; saveState(); render(); };
-document.getElementById("startZ").onchange   = (e)=>{ state.profile.startZ = parseFloat(e.target.value)||0; saveState(); render(); };
+const inStartSta = document.getElementById("startSta");
+  const commitStartSta = ()=>{
+    const t = String(inStartSta.value ?? "").trim();
+    if (t === "") { render(); return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { render(); return; }
+    state.profile.startSta = n;
+    saveState(); render();
+  };
+  inStartSta.onchange = commitStartSta;
+  inStartSta.onblur = commitStartSta;
+const inStartZ = document.getElementById("startZ");
+  const commitStartZ = ()=>{
+    const t = String(inStartZ.value ?? "").trim();
+    if (t === "") { render(); return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { render(); return; }
+    state.profile.startZ = n;
+    saveState(); render();
+  };
+  inStartZ.onchange = commitStartZ;
+  inStartZ.onblur = commitStartZ;
 
 document.getElementById("addGradeRow").onclick = ()=>{
   state.profile.grades.push({ id: state.profile.nextGradeId++, nextSta: 0.000, gradePct: 0.000 });
@@ -2257,17 +2373,29 @@ viewProfile.querySelectorAll("input[data-g-nextsta]").forEach(inp=>{
   const id = parseInt(inp.getAttribute("data-g-nextsta"),10);
   inp.onchange = (e)=>{
     const r = state.profile.grades.find(x=>x.id===id);
-    if (r) r.nextSta = parseFloat(e.target.value)||0;
+    if (!r) return;
+    const t = String(e.target.value ?? "").trim();
+    if (t === "") { render(); return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { render(); return; }
+    r.nextSta = n;
     saveState(); render();
   };
+  inp.onblur = inp.onchange;
 });
 viewProfile.querySelectorAll("input[data-g-grade]").forEach(inp=>{
   const id = parseInt(inp.getAttribute("data-g-grade"),10);
   inp.onchange = (e)=>{
     const r = state.profile.grades.find(x=>x.id===id);
-    if (r) r.gradePct = parseFloat(e.target.value)||0;
+    if (!r) return;
+    const t = String(e.target.value ?? "").trim();
+    if (t === "") { render(); return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { render(); return; }
+    r.gradePct = n;
     saveState(); render();
   };
+  inp.onblur = inp.onchange;
 });
 viewProfile.querySelectorAll("button[data-g-del]").forEach(btn=>{
   const id = parseInt(btn.getAttribute("data-g-del"),10);
@@ -2303,9 +2431,15 @@ viewProfile.querySelectorAll("select[data-vc-vpi]").forEach(sel=>{
   const id = parseInt(sel.getAttribute("data-vc-vpi"),10);
   sel.onchange = (e)=>{
     const r = state.profile.vcurves.find(x=>x.id===id);
-    if (r) r.vpiSta = parseFloat(e.target.value)||0;
+    if (!r) return;
+    const t = String(e.target.value ?? "").trim();
+    if (t === "") { render(); return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { render(); return; }
+    r.vpiSta = n;
     saveState(); render();
   };
+  inp.onblur = inp.onchange;
 });
 viewProfile.querySelectorAll("input[data-vc-l]").forEach(inp=>{
   const id = parseInt(inp.getAttribute("data-vc-l"),10);
@@ -2697,11 +2831,15 @@ bindExtraUI("profile", viewProfile, pitch);
   }
   const inAR = document.getElementById('xsAnchorRight');
   if (inAR) {
-    inAR.oninput = (e)=>{ ensureCrossState(); state.cross.taper.anchorRight = parseFloat(e.target.value)||0; saveState(); };
+    const commitAR = ()=>{ ensureCrossState(); const t=String(inAR.value??"").trim(); if(t===""){ render(); return; } const n=parseFloat(t); if(!Number.isFinite(n)){ render(); return; } state.cross.taper.anchorRight = n; saveState(); render(); };
+    inAR.onchange = commitAR;
+    inAR.onblur = commitAR;
   }
   const inAL = document.getElementById('xsAnchorLeft');
   if (inAL) {
-    inAL.oninput = (e)=>{ ensureCrossState(); state.cross.taper.anchorLeft = parseFloat(e.target.value)||0; saveState(); };
+    const commitAL = ()=>{ ensureCrossState(); const t=String(inAL.value??"").trim(); if(t===""){ render(); return; } const n=parseFloat(t); if(!Number.isFinite(n)){ render(); return; } state.cross.taper.anchorLeft = n; saveState(); render(); };
+    inAL.onchange = commitAL;
+    inAL.onblur = commitAL;
   }
 
   // override width apply
@@ -2826,12 +2964,23 @@ bindExtraUI("profile", viewProfile, pitch);
     }
   }
 
+  // 測点表示ピッチのグリッドも統合（出力と画面の測点がズレないように）
+const pitchStep = Math.max(1e-6, Number(pitch || 1));
+const pitchGrid = [];
+if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) {
+  // pitch が極端に小さいと点数が増えすぎるので、安全側に 1m 未満は 1m に丸める
+  const stepSafe = Math.max(1, pitchStep);
+  for (let s = 0; s < res.total - 1e-9; s += stepSafe) pitchGrid.push(s);
+  pitchGrid.push(res.total);
+}
+
   const sources = [
     { label: "平面主要点", values: planKeyStas },
     ...(state.profile.enabled && profModelOut.ok ? [
       { label: "縦断PV", values: pvStas },
       { label: "縦断曲線(BVC/VPI/EVC)", values: vcStas },
     ] : []),
+    { label: "測点表示ピッチ", values: pitchGrid },
     { label: "平面追加", values: state.extraStations.plan.map(x=>x.m) },
     { label: "縦断追加", values: state.extraStations.profile.map(x=>x.m) },
     { label: "横断追加", values: state.extraStations.cross.map(x=>x.m) },
@@ -2871,7 +3020,7 @@ bindExtraUI("profile", viewProfile, pitch);
         </div>
       </div>
       ${stBuild.notes.map(n=>`<div class="warn">⚠ ${n}</div>`).join("")}
-      <div class="mini" style="margin-top:8px;">※主要点（TS/SC/CS/ST）・PV・BVC/VPI/EVC は自動で含めます（重複は自動排除）</div>
+      <div class="mini" style="margin-top:8px;">※主要点（TS/SC/CS/ST）・PV・BVC/VPI/EVC・測点表示ピッチのグリッドは自動で含めます（重複は自動排除）</div>
     </div>
 
     <div class="card">
@@ -2993,7 +3142,7 @@ bindExtraUI("profile", viewProfile, pitch);
         </div>
       </div>
       <div class="mini" style="margin-top:10px;">
-        更新が反映されないとき：<b>sw.js の CACHE_NAME を v8（例：road-align-v8）</b> に上げると確実です。
+        更新が反映されないとき：<b>sw.js の CACHE_NAME を v11（例：road-align-v11）</b> に上げると確実です。
       </div>
     </div>
   `;
@@ -3052,4 +3201,3 @@ render();
 </script>
 </body>
 </html>
-
