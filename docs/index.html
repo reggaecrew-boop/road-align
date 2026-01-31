@@ -2371,31 +2371,35 @@ document.getElementById("setEndToTotal").onclick = ()=>{
 
 viewProfile.querySelectorAll("input[data-g-nextsta]").forEach(inp=>{
   const id = parseInt(inp.getAttribute("data-g-nextsta"),10);
-  inp.onchange = (e)=>{
+  const apply = (v, commit=false)=>{
     const r = state.profile.grades.find(x=>x.id===id);
     if (!r) return;
-    const t = String(e.target.value ?? "").trim();
-    if (t === "") { render(); return; }
+    const t = String(v ?? "").trim();
+    if (t === "") { if (commit) render(); return; } // 空欄は未確定扱い
     const n = parseFloat(t.replace(/,/g,"."));
-    if (!Number.isFinite(n)) { render(); return; }
+    if (!Number.isFinite(n)) { if (commit) render(); return; }
     r.nextSta = n;
-    saveState(); render();
+    if (commit) { saveState(); render(); }
   };
-  inp.onblur = inp.onchange;
+  inp.oninput  = (e)=> apply(e.target.value, false);
+  inp.onchange = (e)=> apply(e.target.value, true);
+  inp.onblur   = inp.onchange;
 });
 viewProfile.querySelectorAll("input[data-g-grade]").forEach(inp=>{
   const id = parseInt(inp.getAttribute("data-g-grade"),10);
-  inp.onchange = (e)=>{
+  const apply = (v, commit=false)=>{
     const r = state.profile.grades.find(x=>x.id===id);
     if (!r) return;
-    const t = String(e.target.value ?? "").trim();
-    if (t === "") { render(); return; }
+    const t = String(v ?? "").trim();
+    if (t === "") { if (commit) render(); return; }
     const n = parseFloat(t.replace(/,/g,"."));
-    if (!Number.isFinite(n)) { render(); return; }
+    if (!Number.isFinite(n)) { if (commit) render(); return; }
     r.gradePct = n;
-    saveState(); render();
+    if (commit) { saveState(); render(); }
   };
-  inp.onblur = inp.onchange;
+  inp.oninput  = (e)=> apply(e.target.value, false);
+  inp.onchange = (e)=> apply(e.target.value, true);
+  inp.onblur   = inp.onchange;
 });
 viewProfile.querySelectorAll("button[data-g-del]").forEach(btn=>{
   const id = parseInt(btn.getAttribute("data-g-del"),10);
@@ -2408,6 +2412,8 @@ viewProfile.querySelectorAll("button[data-g-del]").forEach(btn=>{
 const addVcurveBtn = document.getElementById("addVcurve");
 if (addVcurveBtn) {
   addVcurveBtn.onclick = ()=>{
+    // 入力中の値が state に反映されるよう、まずフォーカスを外す（iPad対策）
+    try { if (document.activeElement && typeof document.activeElement.blur === "function") document.activeElement.blur(); } catch(e){}
     if (!pvInternal.length) {
       alert("PV点がありません。先に勾配区間を入れてください");
       return;
@@ -2422,6 +2428,7 @@ if (addVcurveBtn) {
 const sortVcurveBtn = document.getElementById("sortVcurve");
 if (sortVcurveBtn) {
   sortVcurveBtn.onclick = ()=>{
+    try { if (document.activeElement && typeof document.activeElement.blur === "function") document.activeElement.blur(); } catch(e){}
     state.profile.vcurves.sort((a,b)=> (Number(a.vpiSta)||0) - (Number(b.vpiSta)||0));
     saveState(); render();
   };
@@ -2439,23 +2446,39 @@ viewProfile.querySelectorAll("select[data-vc-vpi]").forEach(sel=>{
     r.vpiSta = n;
     saveState(); render();
   };
-  inp.onblur = inp.onchange;
+  sel.onblur = sel.onchange;
 });
 viewProfile.querySelectorAll("input[data-vc-l]").forEach(inp=>{
   const id = parseInt(inp.getAttribute("data-vc-l"),10);
-  inp.onchange = (e)=>{
+  const apply = (v, commit=false)=>{
     const r = state.profile.vcurves.find(x=>x.id===id);
-    if (r) r.L = setOrNull(e.target.value);
-    saveState(); render();
+    if (!r) return;
+    const t = String(v ?? "").trim();
+    if (t === "") { r.L = null; if (commit) { saveState(); render(); } return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { if (commit) render(); return; } // 途中入力は保持
+    r.L = n;
+    if (commit) { saveState(); render(); }
   };
+  inp.oninput  = (e)=> apply(e.target.value, false);  // 入力中は再描画しない
+  inp.onchange = (e)=> apply(e.target.value, true);
+  inp.onblur   = inp.onchange;
 });
 viewProfile.querySelectorAll("input[data-vc-y]").forEach(inp=>{
   const id = parseInt(inp.getAttribute("data-vc-y"),10);
-  inp.onchange = (e)=>{
+  const apply = (v, commit=false)=>{
     const r = state.profile.vcurves.find(x=>x.id===id);
-    if (r) r.ymax = setOrNull(e.target.value);
-    saveState(); render();
+    if (!r) return;
+    const t = String(v ?? "").trim();
+    if (t === "") { r.ymax = null; if (commit) { saveState(); render(); } return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { if (commit) render(); return; }
+    r.ymax = n;
+    if (commit) { saveState(); render(); }
   };
+  inp.oninput  = (e)=> apply(e.target.value, false);
+  inp.onchange = (e)=> apply(e.target.value, true);
+  inp.onblur   = inp.onchange;
 });
 viewProfile.querySelectorAll("button[data-vc-del]").forEach(btn=>{
   const id = parseInt(btn.getAttribute("data-vc-del"),10);
@@ -3142,7 +3165,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         </div>
       </div>
       <div class="mini" style="margin-top:10px;">
-        更新が反映されないとき：<b>sw.js の CACHE_NAME を v11（例：road-align-v11）</b> に上げると確実です。
+        更新が反映されないとき：<b>sw.js の CACHE_NAME を v15（例：road-align-v15）</b> に上げると確実です。
       </div>
     </div>
   `;
