@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>道路線形計算（iPadオフラインPWA）</title>
+  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.2</span></title>
 
   <!-- PWA -->
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js");
+      navigator.serviceWorker.register("./sw.js?v=18_2");
     }
   </script>
 
@@ -123,6 +123,7 @@
       <button class="tab" data-jump="secOutput">出力</button>
       <button class="tab" data-jump="secSave">保存</button>
     </div>
+    <div class="mini" id="bootStatus" style="margin-top:8px;"></div>
   </div>
 
   <div id="viewPlan"></div>
@@ -135,6 +136,28 @@
 </div>
 
 <script>
+// --- diagnostics (v18.2) ---
+(function(){
+  const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const show = (title, err)=>{
+    try{
+      const msg = (err && (err.stack || err.message)) ? (err.stack || err.message) : String(err||'');
+      const el = document.getElementById('bootStatus');
+      if (el) {
+        el.innerHTML = `<span class='warn'>⚠️ ${title}: ${escapeHtml(msg)}</span> <button id='btnResetLS2' class='btn btn-ghost' style='margin-left:10px; width:auto;'>保存データ初期化</button>`;
+        setTimeout(()=>{
+          const b=document.getElementById('btnResetLS2');
+          if (b) b.onclick=()=>{ try{ localStorage.removeItem(LS_KEY_NEW); localStorage.removeItem(LS_KEY_OLD); }catch(_){ } location.reload(); };
+        },0);
+      } else {
+        alert(title+": "+msg);
+      }
+    }catch(_){ }
+  };
+  window.addEventListener('error', (e)=> show('JavaScriptエラー', e.error || e.message));
+  window.addEventListener('unhandledrejection', (e)=> show('Promiseエラー', e.reason));
+})();
+
 /* =========================
    State + autosave (iPad)
 ========================= */
@@ -1688,7 +1711,6 @@ class SegmentArc {
     this.type = "arc";
     this.s0 = s0; this.s1 = s0 + L; this.length = L;
     this.R = R; this.turnSign = turnSign;
-    this.mode = mode;
     this.x0 = x0; this.y0 = y0; this.psi0 = psi0;
 
     const nxL = -Math.sin(psi0), nyL = Math.cos(psi0);
@@ -2235,7 +2257,33 @@ const render = () => {
   document.getElementById("outputStep").value = state.outputStep;
 
   const d = Math.max(0, Math.min(4, parseInt(state.coordDecimals, 10) || 3));
-  const { workPoints, res } = computeAll();
+  let workPoints = [];
+  let res = { ok:false, segments:[], stations:[], keypoints:[], warnings:["計算未実行"] };
+  let computeError = null;
+  try {
+    const tmp = computeAll();
+    workPoints = tmp.workPoints;
+    res = tmp.res;
+  } catch (e) {
+    computeError = e;
+  }
+
+  // show boot status / fatal hints
+  const bs = document.getElementById("bootStatus");
+  if (bs) {
+    if (computeError) {
+      const msg = (computeError && (computeError.message || computeError.toString())) || "unknown";
+      bs.innerHTML = `<span class="warn">⚠️ 計算エラーで画面描画が止まりました：${escapeHtml(msg)}</span>
+      <button id="btnResetLS" class="btn btn-ghost" style="margin-left:10px; width:auto; display:inline-block;">保存データ初期化</button>
+      <span class="mini" style="margin-left:10px;">（localStorageを消して再起動）</span>`;
+      setTimeout(()=>{
+        const b = document.getElementById("btnResetLS");
+        if (b) b.onclick = ()=>{ try{ localStorage.removeItem(LS_KEY_NEW); localStorage.removeItem(LS_KEY_OLD); }catch(_){ } location.reload(); };
+      },0);
+    } else {
+      bs.innerHTML = `<span class="mini">起動OK（描画中）</span>`;
+    }
+  }
   const pitch = Math.max(1, Math.floor(state.staPitch||1));
 
   /* -------- PLAN -------- */
@@ -3962,7 +4010,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         </div>
       </div>
       <div class="mini" style="margin-top:10px;">
-        更新が反映されないとき：<b>sw.js の CACHE_NAME を v18（例：road-align-v18）</b> に上げると確実です。
+        更新が反映されないとき：<b>sw.js の CACHE_NAME を v18-1（例：road-align-v18-1）</b> に上げると確実です。
       </div>
     </div>
   `;
@@ -4021,4 +4069,5 @@ render();
 </script>
 </body>
 </html>
+
 
