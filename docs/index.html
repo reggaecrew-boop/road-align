@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.2</span></title>
+  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.3</span></title>
 
   <!-- PWA -->
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_2");
+      navigator.serviceWorker.register("./sw.js?v=18_3");
     }
   </script>
 
@@ -80,17 +80,26 @@
     canvas{ border:1px solid var(--line); border-radius:12px; background:#fff; }
     .footer{ margin-top:16px; text-align:center; color:var(--muted); font-size:12px; }
     .sep{ height:1px; background:var(--line); margin:10px 0; }
+
+    /* header collapse */
+    .headerToggle{ width:auto; padding:6px 10px; font-weight:900; }
+    .title .headerToggle{ margin-left:auto; }
+    .header.collapsed{ padding:10px 14px; }
+    .header.collapsed #headerBody{ display:none; }
+    .header.collapsed .badge{ display:none; }
   </style>
 </head>
 
 <body>
 <div class="wrap">
-  <div class="header">
+  <div class="header" id="topHeader">
     <div class="title">
       道路線形計算（iPadオフラインPWA）
       <span class="badge">同一ページ：平面 → 縦断 → 出力 → 保存 / 自動保存（localStorage）</span>
+      <button id="btnHeaderToggle" class="btn btn-ghost headerToggle" type="button" aria-label="ヘッダ表示切替">▲</button>
     </div>
 
+    <div id="headerBody">
     <div class="row">
       <div style="flex:1; min-width:220px;">
         <label>案件名</label>
@@ -124,6 +133,7 @@
       <button class="tab" data-jump="secSave">保存</button>
     </div>
     <div class="mini" id="bootStatus" style="margin-top:8px;"></div>
+    </div>
   </div>
 
   <div id="viewPlan"></div>
@@ -136,7 +146,7 @@
 </div>
 
 <script>
-// --- diagnostics (v18.2) ---
+// --- diagnostics (v18.3) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
@@ -164,6 +174,32 @@
 const LS_KEY_NEW = "road_align_pwa_state_v3_unified";
 const LS_KEY_OLD = "road_align_pwa_state_v2_profile";
 const LS_KEY = LS_KEY_NEW;
+
+// --- UI state (header collapse) ---
+const UI_KEY = "road_align_pwa_ui_v1";
+let uiState = { headerCollapsed: false };
+try {
+  const raw = localStorage.getItem(UI_KEY);
+  if (raw) uiState = Object.assign(uiState, JSON.parse(raw));
+} catch (e) {}
+function applyHeaderCollapsed(){
+  const header = document.getElementById('topHeader');
+  const body = document.getElementById('headerBody');
+  const btn = document.getElementById('btnHeaderToggle');
+  if (!header || !body || !btn) return;
+  if (uiState.headerCollapsed){
+    header.classList.add('collapsed');
+    btn.textContent = '▼';
+    btn.title = 'ヘッダを表示';
+  } else {
+    header.classList.remove('collapsed');
+    btn.textContent = '▲';
+    btn.title = 'ヘッダを隠す';
+  }
+}
+function saveUI(){
+  try { localStorage.setItem(UI_KEY, JSON.stringify(uiState)); } catch(e) {}
+}
 
 let state = {
   projectName: "テスト案件",
@@ -4065,9 +4101,21 @@ document.querySelectorAll("[data-jump]").forEach(btn=>{
   });
 });
 
+// Header collapse toggle
+(function(){
+  const btn = document.getElementById('btnHeaderToggle');
+  if (btn) {
+    btn.addEventListener('click', ()=>{
+      uiState.headerCollapsed = !uiState.headerCollapsed;
+      saveUI();
+      applyHeaderCollapsed();
+    });
+  }
+  applyHeaderCollapsed();
+})();
+
 render();
 </script>
 </body>
 </html>
-
 
