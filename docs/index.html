@@ -2656,6 +2656,40 @@ viewProfile.querySelectorAll("button[data-vc-del]").forEach(btn=>{
   };
 });
 
+// --- profile diagram controls & draw ---
+const inProfPlot = document.getElementById("profPlotStep");
+if (inProfPlot) {
+  const v = Number(state.profilePlotStep ?? 5.0);
+  inProfPlot.value = Number.isFinite(v) ? v.toFixed(1) : "5.0";
+  const commitProfPlot = ()=>{
+    const t = String(inProfPlot.value ?? "").trim();
+    if (t === "") { render(); return; }
+    const n = parseFloat(t.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { render(); return; }
+    state.profilePlotStep = Math.max(0.1, n);
+    saveState(); render();
+  };
+  inProfPlot.onchange = commitProfPlot;
+  inProfPlot.onblur = commitProfPlot;
+}
+
+const cbPV = document.getElementById("profShowPV");
+const cbVC = document.getElementById("profShowVC");
+if (cbPV) cbPV.checked = !!state.profileShowPV;
+if (cbVC) cbVC.checked = !!state.profileShowVC;
+if (cbPV) cbPV.onchange = (e)=>{ state.profileShowPV = !!e.target.checked; saveState(); render(); };
+if (cbVC) cbVC.onchange = (e)=>{ state.profileShowVC = !!e.target.checked; saveState(); render(); };
+
+const profCanvas = document.getElementById("profileCanvas");
+if (profCanvas) {
+  drawProfileCanvas(profCanvas, profModel, res.total, {
+    plotStep: state.profilePlotStep,
+    showPV: state.profileShowPV,
+    showVC: state.profileShowVC,
+    pitch
+  });
+}
+
 bindExtraUI("profile", viewProfile, pitch);
 
 /* -------- CROSS -------- */
