@@ -475,6 +475,390 @@ const downloadText = (text, filename, mime="text/plain;charset=utf-8") => {
   a.click();
 };
 
+/* =========================
+   v18: Plan export (SIMA/XRF) + Design elevation query
+========================= */
+
+// ASCII-safe name for SIMA and XRF (avoid encoding trouble on import)
+const normNameAscii = (s, maxLen=32) => {
+  s = String(s ?? "").trim();
+  if (!s) s = "P";
+  // replace anything except [A-Za-z0-9_ . + -] with _
+  s = s.replace(/[^\w\.\+\-]/g, "_").replace(/_+/g, "_");
+  if (s.length > maxLen) s = s.slice(0, maxLen);
+  return s;
+};
+
+// Parse station input in 100m-major style (e.g., "STA2+12.651" => 212.651m)
+// Also accepts plain meters ("212.651") and "STA.-1-20" style.
+const parseSta100 = (token) => {
+  let s = String(token ?? "").trim();
+  if (!s) throw new Error("STAが空です");
+  s = s.replace(/[mMｍＭ]\s*$/, "").trim();
+  s = s.replace(/^STA\.?/i, "").trim();
+
+  // allow "2+12.651"
+  if (s.includes("+")) {
+    const [a,b] = s.split("+",2);
+    const k = parseFloat(a.trim());
+    const rem = parseFloat(b.trim());
+    if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("STA形式が不正です");
+    return k*100 + rem;
+  }
+
+  // allow "-1-20" (meaning -100 - 20)
+  const m = s.match(/^(-?\d+(?:\.\d+)?)[-－](\d+(?:\.\d+)?)$/);
+  if (m) {
+    const k = parseFloat(m[1]);
+    const rem = parseFloat(m[2]);
+    if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("STA形式が不正です");
+    return k*100 - rem;
+  }
+
+  const mv = parseFloat(s);
+  if (!Number.isFinite(mv)) throw new Error("数値が不正です");
+  return mv;
+};
+
+const staName100 = (m, dec=3) => {
+  m = Number(m);
+  if (!Number.isFinite(m)) return "STA.?";
+  const isNeg = m < 0;
+  // major is 100m unit
+  let major;
+  if (!isNeg) major = Math.floor(m/100);
+  else major = -Math.ceil(Math.abs(m)/100);
+  let rem = m - major*100;
+  if (Math.abs(rem) < 1e-9) rem = 0;
+
+  if (rem === 0) return `STA.${major}`;
+  const sign = rem >= 0 ? "+" : "-";
+  const a = Math.abs(rem);
+  // integer-ish -> no decimals
+  const r = Math.abs(a - Math.round(a)) < 1e-9 ? String(Math.round(a)) : a.toFixed(dec).replace(/\.?0+$/,"");
+  return `STA.${major}${sign}${r}`;
+};
+
+const degToDmsStr = (deg) => {
+  deg = wrap360(Number(deg) || 0);
+  let D = Math.floor(deg);
+  let r = (deg - D) * 60;
+  let M = Math.floor(r);
+  let S = (r - M) * 60;
+  // normalize carry
+  if (S >= 59.999995) { S = 0; M += 1; }
+  if (M >= 60) { M = 0; D = (D + 1) % 360; }
+  const mm = String(M).padStart(2,"0");
+  const ss = String(S.toFixed(5)).padStart(8,"0");
+  return `${D}-${mm}-${ss}`;
+};
+
+const xmlEscape = (s) =>
+  String(s ?? "")
+    .replace(/&/g,"&amp;")
+    .replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;")
+    .replace(/'/g,"&apos;");
+
+// Cross: integrate piecewise slopes to get ΔZ at offset (m)
+const evalCrossDzAtOffset = (segs, off) => {
+  off = Math.max(0, Number(off) || 0);
+  segs = (Array.isArray(segs)?segs:[]).slice().sort((a,b)=> (Number(a.end)||0) - (Number(b.end)||0));
+  if (!segs.length) return 0;
+  let z = 0;
+  let x0 = 0;
+  let lastSlope = Number(segs[0].slopePct)||0;
+  for (const r of segs) {
+    const x1 = Number(r.end);
+    const slope = Number(r.slopePct)||0;
+    if (!Number.isFinite(x1) || x1 <= x0 + 1e-12) continue;
+    lastSlope = slope;
+    const use = Math.min(off, x1);
+    if (use > x0) z += (slope/100) * (use - x0);
+    x0 = x1;
+    if (off <= x1 + 1e-12) return z;
+  }
+  // extend beyond last end with last slope
+  if (off > x0 + 1e-12) z += (lastSlope/100) * (off - x0);
+  return z;
+};
+
+// Cross: at STA (m), choose override segments if present.
+// If between two overrides, linearly interpolate ΔZ(off) (supports different segment structures).
+const evalCrossDzAtSta = (m, side, off) => {
+  ensureCrossState();
+  side = (side === "left") ? "left" : "right";
+  m = Number(m);
+  off = Math.max(0, Number(off) || 0);
+
+  const key = Number(m).toFixed(3);
+  const ovr = state.cross?.overrides?.[key]?.[side];
+  if (ovr?.segs?.length) {
+    const w = computeCrossRowsFromSegs(ovr.segs).lastEnd || 0;
+    return { dz: evalCrossDzAtOffset(ovr.segs, off), width: w, source: "例外(一致)", prevKey: key, nextKey: key, t: 0 };
+  }
+
+  // build control list from overrides
+  const pts = [];
+  for (const k of Object.keys(state.cross?.overrides || {})) {
+    const mk = Number(k);
+    if (!Number.isFinite(mk)) continue;
+    const segs = state.cross.overrides[k]?.[side]?.segs;
+    if (!segs?.length) continue;
+    const w = computeCrossRowsFromSegs(segs).lastEnd || 0;
+    if (w > 0) pts.push({ m: mk, key: k, segs, w });
+  }
+  pts.sort((a,b)=>a.m-b.m);
+
+  let prev=null, next=null;
+  for (const p of pts) {
+    if (p.m < m - 1e-9) prev = p;
+    else if (p.m > m + 1e-9) { next = p; break; }
+  }
+
+  if (prev && next) {
+    const t = (m - prev.m) / Math.max(1e-9, (next.m - prev.m));
+    const dz0 = evalCrossDzAtOffset(prev.segs, off);
+    const dz1 = evalCrossDzAtOffset(next.segs, off);
+    const w = prev.w + (next.w - prev.w) * t;
+    return { dz: dz0 + (dz1 - dz0) * t, width: w, source: "擦り付け(ΔZ線形補間)", prevKey: prev.key, nextKey: next.key, t };
+  }
+  if (prev) {
+    return { dz: evalCrossDzAtOffset(prev.segs, off), width: prev.w, source: "前の例外保持", prevKey: prev.key, nextKey: "", t: 0 };
+  }
+  if (next) {
+    return { dz: evalCrossDzAtOffset(next.segs, off), width: next.w, source: "後の例外保持", prevKey: "", nextKey: next.key, t: 0 };
+  }
+
+  // fall back: common or width-taper based on control points
+  const eff = getEffectiveCrossSegsAt(m, side);
+  const w = computeCrossRowsFromSegs(eff.segs).lastEnd || (eff.info?.width||0);
+  return { dz: evalCrossDzAtOffset(eff.segs, off), width: w, source: eff.info?.source ? `${eff.info.source}(${eff.info.mode||""})` : "共通", prevKey:"", nextKey:"", t:0 };
+};
+
+const buildPlanSimaText = (projectName, workPoints, keypoints, stations, segments) => {
+  // ASCII-only SIMA to be safely read as Shift-JIS by legacy tools.
+  const lines = [];
+  const proj = normNameAscii(projectName || "ALIGN", 24);
+
+  const points = [];
+  const addPt = (name, E, N, Z=0) => {
+    if (!Number.isFinite(E) || !Number.isFinite(N)) return;
+    points.push({ name: normNameAscii(name, 16), E:Number(E), N:Number(N), Z:Number(Z)||0 });
+  };
+
+  // PIs
+  for (const p of (workPoints||[])) addPt(p.name, p.E, p.N, 0);
+
+  // Keypoints (TS/SC/CS/ST)
+  const kps = (keypoints||[]).filter(k=>Number.isFinite(k.sta)).slice().sort((a,b)=>a.sta-b.sta);
+  for (const k of kps) addPt(k.name, k.E, k.N, 0);
+
+  // Stations (use RGm-like names)
+  for (const s of (stations||[])) {
+    const name = staName100(s, 3);
+    const p = evalAlignment(segments, s);
+    addPt(name, p.E, p.N, 0);
+  }
+
+  // Deduplicate by (name,E,N) roughly, and also keep first occurrence of names
+  const seen = new Set();
+  const outPts = [];
+  for (const p of points) {
+    const key = `${p.name}|${p.E.toFixed(6)}|${p.N.toFixed(6)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    outPts.push(p);
+  }
+
+  // Build id map
+  const idOf = {};
+  outPts.forEach((p,i)=>{ idOf[p.name] = i+1; });
+
+  lines.push("Z00, /* TREND-ONE(MINOR 07.00) : BuildNo 7012 */,");
+  lines.push("Z01,2,");
+  lines.push("G00,03,01,");
+  lines.push("Z00, /* COORDINATE DATA */,");
+  lines.push("A00,");
+
+  for (let i=0;i<outPts.length;i++) {
+    const p = outPts[i];
+    const id = String(i+1).padStart(5," ");
+    const nm = (p.name||"P").padEnd(16," ");
+    lines.push(`A01,${id},${nm},${p.E.toFixed(6)},${p.N.toFixed(6)},${p.Z.toFixed(3)},`);
+  }
+
+  lines.push("A99,");
+  lines.push("Z00, /* ROUTE DATA */,");
+  // Centerline with station list
+  lines.push(`F00,3,1,${proj},3,`);
+  lines.push("F03,   0.0000, 100.0000,  20.0000,");
+  // Start
+  const bpName = normNameAscii(workPoints?.[0]?.name || "BP", 16);
+  const epName = normNameAscii(workPoints?.[workPoints.length-1]?.name || "EP", 16);
+  if (idOf[bpName]) {
+    lines.push(`B01,${String(idOf[bpName]).padStart(5," ")},${bpName},`);
+    lines.push(`B03,${(0).toFixed(4).padStart(10," ")},`);
+  }
+  lines.push("C00,");
+  for (const s of (stations||[])) {
+    const nm = normNameAscii(staName100(s,3), 16);
+    const pid = idOf[nm];
+    if (!pid) continue;
+    lines.push(`B01,${String(pid).padStart(5," ")},${nm},`);
+    lines.push(`B03,${s.toFixed(4).padStart(10," ")},`);
+  }
+  lines.push("C99,");
+  // End
+  const total = stations?.length ? stations[stations.length-1] : 0;
+  if (idOf[epName]) {
+    lines.push(`B01,${String(idOf[epName]).padStart(5," ")},${epName},`);
+    lines.push(`B03,${Number(total||0).toFixed(4).padStart(10," ")},`);
+  }
+  lines.push("F99,");
+
+  return lines.join("\r\n");
+};
+
+const buildPlanXrfText = (projectName, workPoints, keypoints, stations, segments) => {
+  const route = projectName ? String(projectName) : "線形";
+  const nmRoute = xmlEscape(route);
+  const total = segments?.length ? Number(segments[segments.length-1].s1) : 0;
+
+  const endNO = Math.floor(total/100);
+  const endAdd = total - endNO*100;
+  const sub = Number(state.outputStep||20).toFixed(4);
+
+  // element points: BP + keypoints + EP (sorted by sta)
+  const epts = [];
+  const pushEpt = (name, s, E, N) => {
+    if (!Number.isFinite(E) || !Number.isFinite(N)) return;
+    epts.push({ name: normNameAscii(name, 32), s: Number(s), E:Number(E), N:Number(N) });
+  };
+
+  if (workPoints?.length) pushEpt(workPoints[0].name, 0, workPoints[0].E, workPoints[0].N);
+  for (const k of (keypoints||[])) {
+    if (!Number.isFinite(k.sta)) continue;
+    pushEpt(k.name, k.sta, k.E, k.N);
+  }
+  if (workPoints?.length) pushEpt(workPoints[workPoints.length-1].name, total, workPoints[workPoints.length-1].E, workPoints[workPoints.length-1].N);
+
+  // dedupe by s within 1mm keeping first
+  epts.sort((a,b)=>a.s-b.s);
+  const epts2=[];
+  for (const p of epts) {
+    if (!epts2.length || Math.abs(p.s - epts2[epts2.length-1].s) > 1e-3) epts2.push(p);
+  }
+
+  const eptNameAt = (s, preferPrefix=null) => {
+    const key = epts2.filter(p=>Math.abs(p.s - s) <= 1e-3);
+    if (!key.length) return normNameAscii(staName100(s,3), 32);
+    if (preferPrefix) {
+      const f = key.find(p=>String(p.name).startsWith(preferPrefix));
+      if (f) return f.name;
+    }
+    return key[0].name;
+  };
+
+  // PIs: work points only
+  const pis = (workPoints||[]).map(p=>({ name: normNameAscii(p.name, 32), E:p.E, N:p.N }));
+
+  // Build gm elements: include spiral/arc/straight
+  const elems = [];
+  let idx=1;
+  for (const seg of (segments||[])) {
+    if (!seg || !Number.isFinite(seg.s0) || !Number.isFinite(seg.s1)) continue;
+    const s0=seg.s0, s1=seg.s1;
+    const startNm = eptNameAt(s0, seg.type==="spiral" ? (seg.mode==="in" ? "TS(" : "CS(") : (seg.type==="arc" ? "SC(" : null));
+    const endNm   = eptNameAt(s1, seg.type==="spiral" ? (seg.mode==="in" ? "SC(" : "ST(") : (seg.type==="arc" ? "CS(" : null));
+
+    // RefPI: attempt from keypoint name like TS(IP.1)
+    const pickPi = (nm)=> {
+      const m = String(nm).match(/^[A-Z]+?\((.+?)\)$/);
+      if (m) return normNameAscii(m[1], 32);
+      return "";
+    };
+    const refPi = pickPi(startNm) || pickPi(endNm);
+
+    if (seg.type === "arc") {
+      elems.push({
+        name: `CURVE${idx++}`,
+        startNm, endNm, refPi,
+        xml: `<rgm:Curve Direction="${seg.turnSign>0?"ccw":"cw"}" Radius="${Number(seg.R).toFixed(4)}" Length="${Number(seg.length).toFixed(4)}"/>`
+      });
+    } else if (seg.type === "spiral") {
+      const L = Number(seg.length);
+      const R = Number(seg.R);
+      const A = Math.sqrt(Math.max(0, R*L));
+      const sr = (seg.mode === "in") ? 0.0 : R;
+      const er = (seg.mode === "in") ? R : 0.0;
+      elems.push({
+        name: `CLOTHOID${idx++}`,
+        startNm, endNm, refPi,
+        xml: `<rgm:Clothoid Direction="${seg.turnSign>0?"ccw":"cw"}" StartRadius="${sr.toFixed(4)}" EndRadius="${er.toFixed(4)}" A="${A.toFixed(4)}" Length="${L.toFixed(4)}"/>`
+      });
+    } else if (seg.type === "straight") {
+      // NOTE: RoadGM schema usually allows Straight elements; kept for generality.
+      elems.push({
+        name: `LINE${idx++}`,
+        startNm, endNm, refPi,
+        xml: `<rgm:Line Length="${Number(seg.length).toFixed(4)}"/>`
+      });
+    }
+  }
+
+  const lines=[];
+  lines.push('<?xml version="1.0" encoding="UTF-8"?>');
+  lines.push('<tsf:TSFormControlData version="4.1" xmlns:tsf="http://www.nilim.go.jp/ts/main/TSFormControl-4.1" xmlns:rgm="http://www.nilim.go.jp/ts/main/RoadGM-1.1">');
+  lines.push('\t<tsf:StructureType type="道路土工" jobName="" company="" stationType="NO"/>');
+  lines.push(`\t<rgm:RoadGm RouteName="${nmRoute}" Classification="" DesignSpeed="0">`);
+  lines.push('\t\t<rgm:Alignments>');
+  lines.push(`\t\t\t<rgm:Alignment Name="${nmRoute}" RefCRS="" IsRiver="0">`);
+  lines.push(`\t\t\t\t<rgm:Horizontal Name="${nmRoute}" StartStationNO="0" StartAddDist="0.0000" CumulativeDist="0.0000" EndStationNO="${endNO}" EndAddDist="${endAdd.toFixed(4)}" Length="${total.toFixed(4)}" Method="要素法">`);
+  lines.push('\t\t\t\t\t<rgm:StationEquation>');
+  lines.push(`						<rgm:Interval Main=\"100.0000\" Sub=\"${sub}\"/>`);
+  lines.push('\t\t\t\t\t</rgm:StationEquation>');
+
+  // ElementPnts
+  lines.push('\t\t\t\t\t<rgm:ElementPnts>');
+  for (const p of epts2) {
+    lines.push(`\t\t\t\t\t\t<rgm:ElementPnt Name="${xmlEscape(p.name)}" x="${p.E.toFixed(6)}" y="${p.N.toFixed(6)}"/>`);
+  }
+  lines.push('\t\t\t\t\t</rgm:ElementPnts>');
+
+  // PIs
+  lines.push('\t\t\t\t\t<rgm:PIs>');
+  for (const p of pis) {
+    lines.push(`\t\t\t\t\t\t<rgm:PI Name="${xmlEscape(p.name)}" x="${Number(p.E).toFixed(6)}" y="${Number(p.N).toFixed(6)}"/>`);
+  }
+  lines.push('\t\t\t\t\t</rgm:PIs>');
+
+  // IntermediatePnts
+  lines.push('\t\t\t\t\t<rgm:IntermediatePnts>');
+  for (const s of (stations||[])) {
+    const p = evalAlignment(segments, s);
+    const nm = staName100(s, 3);
+    lines.push(`\t\t\t\t\t\t<rgm:IntermediatePnt Name="${xmlEscape(normNameAscii(nm,32))}" x="${p.E.toFixed(6)}" y="${p.N.toFixed(6)}" CumulativeDist="${Number(s).toFixed(4)}" TangentDirectionAngle="${degToDmsStr(p.az)}"/>`);
+  }
+  lines.push('\t\t\t\t\t</rgm:IntermediatePnts>');
+
+  // Elements
+  for (const e of elems) {
+    const ref = e.refPi ? ` RefPI="${xmlEscape(e.refPi)}"` : "";
+    lines.push(`\t\t\t\t\t<rgm:GmElement Name="${xmlEscape(e.name)}" StartElementPnt="${xmlEscape(e.startNm)}" EndElementPnt="${xmlEscape(e.endNm)}"${ref}>`);
+    lines.push(`\t\t\t\t\t\t${e.xml}`);
+    lines.push('\t\t\t\t\t</rgm:GmElement>');
+  }
+
+  lines.push('\t\t\t\t</rgm:Horizontal>');
+  lines.push('\t\t\t</rgm:Alignment>');
+  lines.push('\t\t</rgm:Alignments>');
+  lines.push('\t</rgm:RoadGm>');
+  lines.push('</tsf:TSFormControlData>');
+  return lines.join("\n");
+};
+
 const downloadCSV = (rows, filename) => {
   if (!rows?.length) return;
   const headers = Object.keys(rows[0]);
@@ -1304,6 +1688,7 @@ class SegmentArc {
     this.type = "arc";
     this.s0 = s0; this.s1 = s0 + L; this.length = L;
     this.R = R; this.turnSign = turnSign;
+    this.mode = mode;
     this.x0 = x0; this.y0 = y0; this.psi0 = psi0;
 
     const nxL = -Math.sin(psi0), nyL = Math.cos(psi0);
@@ -1340,6 +1725,7 @@ class SegmentSpiral {
     this.s0 = s0; this.s1 = s0 + Ls; this.length = Ls;
     this.R = R;
     this.turnSign = turnSign;
+    this.mode = mode;
 
     const n = Math.max(1, Math.ceil(Ls / Math.max(ds, 1e-6)));
     const step = Ls / n;
@@ -3322,6 +3708,63 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
       </div>
       <div class="mini" style="margin-top:8px;">※プレビューは先頭200点まで</div>
     </div>
+
+    <div class="card">
+      <h2>平面線形 出力（SIMA / XRF）</h2>
+      <div class="grid grid-3">
+        <div class="mini">
+          <b>拡張子</b>：.sim（SIMA） / .xrf（RoadGM）<br/>
+          .sim は<b>ASCII限定</b>で出力（Shift-JIS環境でも壊れにくくするため）<br/>
+          .xrf は UTF-8
+        </div>
+        <div>
+          <button class="btn btn-ok" id="dlPlanSIM" ${stBuild.stations.length ? "" : "disabled"}>SIMA(.sim)ダウンロード</button>
+          <div style="height:10px;"></div>
+          <button class="btn btn-ok" id="dlPlanXRF" ${stBuild.stations.length ? "" : "disabled"}>XRF(.xrf)ダウンロード</button>
+          <div class="mini" style="margin-top:8px;">
+            ファイル名：${state.projectName}_plan.sim / ${state.projectName}_plan.xrf
+          </div>
+        </div>
+        <div class="mini">
+          出力対象：<b>平面</b>（中心線）<br/>
+          中間点：統合測点（基準+主要点+追加）<br/>
+          座標：E/N（小数6桁）
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>指定点の計画標高（STA + 左右 + 幅）</h2>
+      <div class="grid grid-3">
+        <div>
+          <label>STA（例：STA2+12.651 / 2+12.651 / 212.651）</label>
+          <input id="qSta" type="text" inputmode="decimal" autocomplete="off" placeholder="STA2+12.651" />
+        </div>
+        <div>
+          <label>方向</label>
+          <select id="qSide">
+            <option value="center">中心（幅=0）</option>
+            <option value="right">右</option>
+            <option value="left">左</option>
+          </select>
+          <div class="mini" style="margin-top:8px;">
+            <span class="pill" id="qWidthPill">端部幅員：-</span>
+          </div>
+        </div>
+        <div>
+          <label>中心からの距離（m）</label>
+          <input id="qOffset" type="number" step="0.001" min="0" value="0.000" />
+          <div style="height:10px;"></div>
+          <button class="btn btn-ok" id="btnQueryElev">標高を計算</button>
+        </div>
+      </div>
+
+      <div id="qOut" class="mini" style="margin-top:10px;"></div>
+      <div class="mini" style="margin-top:8px;">
+        ※横断は <b>例外測点</b> があれば優先。例外が前後にあれば <b>ΔZ（中心→指定幅）を線形補間</b> して擦り付け扱いにします。<br/>
+        ※縦断がOFFのときは中心標高（GL）が計算できません。
+      </div>
+    </div>
   `;
 
   bindExtraUI("output", viewOutput, pitch);
@@ -3346,6 +3789,158 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
       downloadText(lines.join("\n"), `${state.projectName}_中心線.csv`, "text/csv;charset=utf-8");
     };
   }
+    /* -------- v18: plan export -------- */
+  const btnSim = document.getElementById("dlPlanSIM");
+  if (btnSim) {
+    btnSim.onclick = ()=> {
+      try {
+        const sim = buildPlanSimaText(state.projectName, workPoints, res.keypoints, stBuild.stations, res.segments);
+        downloadText(sim, `${state.projectName}_plan.sim`, "text/plain;charset=utf-8");
+      } catch (e) {
+        alert("SIMA出力に失敗: " + (e?.message || e));
+      }
+    };
+  }
+  const btnXrf = document.getElementById("dlPlanXRF");
+  if (btnXrf) {
+    btnXrf.onclick = ()=> {
+      try {
+        const xrf = buildPlanXrfText(state.projectName, workPoints, res.keypoints, stBuild.stations, res.segments);
+        downloadText(xrf, `${state.projectName}_plan.xrf`, "application/xml;charset=utf-8");
+      } catch (e) {
+        alert("XRF出力に失敗: " + (e?.message || e));
+      }
+    };
+  }
+
+  /* -------- v18: design elevation query -------- */
+  const qSta = document.getElementById("qSta");
+  const qSide = document.getElementById("qSide");
+  const qOffset = document.getElementById("qOffset");
+  const qOut = document.getElementById("qOut");
+  const qWidthPill = document.getElementById("qWidthPill");
+  const btnQ = document.getElementById("btnQueryElev");
+
+  const totalLen = res.total;
+
+  const updateWidthPill = () => {
+    if (!qWidthPill) return;
+    const side = qSide?.value || "center";
+    if (side === "center") { qWidthPill.textContent = "端部幅員：0.000 m"; return; }
+    try {
+      const m = parseSta100(qSta?.value || "");
+      if (!Number.isFinite(m)) throw new Error("STA不正");
+      const cr = evalCrossDzAtSta(m, side, 0);
+      qWidthPill.textContent = `端部幅員：${Number(cr.width||0).toFixed(3)} m`;
+    } catch {
+      qWidthPill.textContent = "端部幅員：-";
+    }
+  };
+
+  if (qSta) qSta.oninput = updateWidthPill;
+  if (qSide) qSide.onchange = updateWidthPill;
+
+  const segTable = (segs) => {
+    if (!segs?.length) return "<div class='mini'>(横断定義なし)</div>";
+    const rows = segs.slice().sort((a,b)=>(+a.end)-(+b.end)).map(r=>{
+      const end = (+r.end).toFixed(3);
+      const g = (+r.slopePct).toFixed(3);
+      return `<tr><td class="right">${end}</td><td class="right">${g}</td></tr>`;
+    }).join("");
+    return `
+      <div style="overflow:auto; margin-top:6px;">
+        <table>
+          <thead><tr><th class="right">区間終点(m)</th><th class="right">勾配(%)</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  };
+
+  if (btnQ) {
+    btnQ.onclick = ()=> {
+      try {
+        const mRaw = parseSta100(qSta?.value || "");
+        let m = mRaw;
+        const side = qSide?.value || "center";
+        let off = Number(qOffset?.value || 0);
+        if (!Number.isFinite(off) || off < 0) off = 0;
+
+        // clamp to range
+        if (m < 0) m = 0;
+        if (m > totalLen) m = totalLen;
+        if (side === "center") off = 0;
+
+        const staDisp100 = staName100(m, 3);
+        const staDispPitch = metersToStaPitch(m, pitch, 3);
+
+        const zc = state.profile.enabled ? evalProfileZ(profModelOut, m) : NaN;
+
+        let cr = { dz:0, width:0, source:"中心", prevKey:"", nextKey:"", t:0 };
+        if (side !== "center") cr = evalCrossDzAtSta(m, side, off);
+
+        const z = Number.isFinite(zc) ? (zc + cr.dz) : NaN;
+
+        // show segment info
+        let segInfoHtml = "";
+        if (side === "center") {
+          segInfoHtml = "<div class='mini'>横断：中心（ΔZ=0）</div>";
+        } else if (cr.source.startsWith("擦り付け") && cr.prevKey && cr.nextKey) {
+          const s0 = state.cross.overrides[cr.prevKey]?.[side]?.segs || [];
+          const s1 = state.cross.overrides[cr.nextKey]?.[side]?.segs || [];
+          segInfoHtml = `
+            <div class="mini">横断：${cr.source}（t=${cr.t.toFixed(3)}）</div>
+            <div class="mini">前：${cr.prevKey} / 後：${cr.nextKey}</div>
+            <div class="mini"><b>前の横断</b></div>
+            ${segTable(s0)}
+            <div class="mini" style="margin-top:6px;"><b>後の横断</b></div>
+            ${segTable(s1)}
+          `;
+        } else if (cr.prevKey) {
+          const s0 = state.cross.overrides[cr.prevKey]?.[side]?.segs || [];
+          segInfoHtml = `<div class="mini">横断：${cr.source}（${cr.prevKey}）</div>${segTable(s0)}`;
+        } else if (cr.nextKey) {
+          const s1 = state.cross.overrides[cr.nextKey]?.[side]?.segs || [];
+          segInfoHtml = `<div class="mini">横断：${cr.source}（${cr.nextKey}）</div>${segTable(s1)}`;
+        } else {
+          const eff = getEffectiveCrossSegsAt(m, side);
+          segInfoHtml = `<div class="mini">横断：${cr.source}</div>${segTable(eff.segs)}`;
+        }
+
+        const note = [];
+        if (Math.abs(mRaw - m) > 1e-9) note.push(`STAが範囲外のため ${m.toFixed(3)}m に丸めました`);
+        if (!Number.isFinite(zc)) note.push("縦断がOFFのため中心標高(GL)が計算できません");
+        if (side !== "center" && off > (cr.width||0) + 1e-9) note.push(`指定幅 ${off.toFixed(3)}m は端部幅員 ${Number(cr.width||0).toFixed(3)}m を超えています（外挿でΔZ計算）`);
+
+        qOut.innerHTML = `
+          <div class="grid grid-3">
+            <div class="mini">
+              <b>STA</b>：${staDisp100}（${m.toFixed(3)}m）<br/>
+              <b>表示STA</b>：${staDispPitch}（pitch=${pitch}）<br/>
+              <b>方向</b>：${side==="right"?"右":side==="left"?"左":"中心"} / <b>幅</b>：${off.toFixed(3)}m
+            </div>
+            <div class="mini">
+              <b>中心標高(GL)</b>：${Number.isFinite(zc)?zc.toFixed(3):"-"}<br/>
+              <b>ΔZ(中心→指定幅)</b>：${cr.dz.toFixed(3)}<br/>
+              <b>計画標高</b>：${Number.isFinite(z)?z.toFixed(3):"-"}
+            </div>
+            <div class="mini">
+              <b>端部幅員</b>：${Number(cr.width||0).toFixed(3)}m<br/>
+              <b>横断判定</b>：${cr.source}
+            </div>
+          </div>
+          ${note.length ? note.map(x=>`<div class="warn">⚠ ${x}</div>`).join("") : ""}
+          <div class="sep"></div>
+          ${segInfoHtml}
+        `;
+        updateWidthPill();
+      } catch(e) {
+        alert("計算に失敗: " + (e?.message || e));
+      }
+    };
+  }
+
+  updateWidthPill();
+
   /* -------- SAVE -------- */
   viewSave.innerHTML = `
     <div class="card" id="secSave">
@@ -3367,7 +3962,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         </div>
       </div>
       <div class="mini" style="margin-top:10px;">
-        更新が反映されないとき：<b>sw.js の CACHE_NAME を v15（例：road-align-v15）</b> に上げると確実です。
+        更新が反映されないとき：<b>sw.js の CACHE_NAME を v18（例：road-align-v18）</b> に上げると確実です。
       </div>
     </div>
   `;
