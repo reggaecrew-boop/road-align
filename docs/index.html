@@ -182,6 +182,11 @@ let state = {
   showKeypoints: true,
   showArrow: false,
 
+  // 縦断簡易図
+  profilePlotStep: 5.0,
+  profileShowPV: true,
+  profileShowVC: true,
+
   // ===== 縦断（勾配区間 + 縦断曲線(VPI単位)） =====
   profile: {
     enabled: true,
@@ -387,6 +392,16 @@ function normalizeState(s) {
   if (s.cross.ui.selectedStaKey && !s.cross.overrides[s.cross.ui.selectedStaKey]) {
     s.cross.ui.selectedStaKey = "";
   }
+// --- view options defaults ---
+if (!Number.isFinite(s.plotStep)) s.plotStep = 5.0;
+if (typeof s.showKeypoints !== "boolean") s.showKeypoints = true;
+if (typeof s.showArrow !== "boolean") s.showArrow = false;
+
+if (!Number.isFinite(s.profilePlotStep)) s.profilePlotStep = 5.0;
+if (typeof s.profileShowPV !== "boolean") s.profileShowPV = true;
+if (typeof s.profileShowVC !== "boolean") s.profileShowVC = true;
+
+
 
 
   return s;
@@ -1686,6 +1701,132 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
   }
 }
 
+function drawProfileCanvas(canvas, model, total, options) {
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
+
+  // background
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0,0,W,H);
+
+  if (!model?.ok || !Number.isFinite(total) || total <= 0) {
+    ctx.fillStyle = "#334155";
+    ctx.font = "14px system-ui";
+    ctx.fillText("縦断が未確定です（勾配区間を入力してください）", 20, 40);
+    return;
+  }
+
+  const step = Math.max(0.1, Number(options?.plotStep ?? 5.0));
+  const n = Math.max(2, Math.ceil(total / step) + 1);
+
+  const pts = [];
+  for (let i=0;i<n;i++){
+    const s = (i === n-1) ? total : i*step;
+    const z = evalProfileZ(model, s);
+    if (Number.isFinite(z)) pts.push({s, z});
+  }
+  if (!pts.length) return;
+
+  // Include PV points & curve endpoints in bounds
+  let minZ=Infinity, maxZ=-Infinity;
+  const addZ = (z)=>{ minZ=Math.min(minZ,z); maxZ=Math.max(maxZ,z); };
+  for (const p of pts) addZ(p.z);
+  for (const pv of (model.pv||[])) if (Number.isFinite(pv.z)) addZ(pv.z);
+  for (const c of (model.curves||[])) {
+    const zb = evalProfileZ(model, c.s0);
+    const ze = evalProfileZ(model, c.s1);
+    if (Number.isFinite(zb)) addZ(zb);
+    if (Number.isFinite(ze)) addZ(ze);
+  }
+  if (!Number.isFinite(minZ) || !Number.isFinite(maxZ)) return;
+  const dz = Math.max(1e-6, maxZ - minZ);
+
+  const padL=50, padR=20, padT=20, padB=35;
+  const x0 = padL, x1 = W - padR;
+  const y0 = padT, y1 = H - padB;
+
+  const toX = (s)=> x0 + (s/total) * (x1-x0);
+  const toY = (z)=> y1 - ((z - minZ)/dz) * (y1-y0);
+
+  // axes
+  ctx.strokeStyle = "#e2e8f0";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.lineTo(x1, y1);
+  ctx.stroke();
+
+  // grid (4 lines)
+  ctx.strokeStyle = "#f1f5f9";
+  for (let i=1;i<=4;i++){
+    const t = i/5;
+    const yg = y0 + t*(y1-y0);
+    ctx.beginPath(); ctx.moveTo(x0, yg); ctx.lineTo(x1, yg); ctx.stroke();
+  }
+
+  // main profile polyline
+  ctx.strokeStyle = "#0f172a";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i=0;i<pts.length;i++){
+    const x = toX(pts[i].s);
+    const y = toY(pts[i].z);
+    if (i===0) ctx.moveTo(x,y);
+    else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+
+  // vertical curve highlights
+  if (options?.showVC) {
+    ctx.strokeStyle = "#2563eb";
+    ctx.lineWidth = 3;
+    for (const c of (model.curves||[])) {
+      const s0 = clamp(c.s0, 0, total);
+      const s1 = clamp(c.s1, 0, total);
+      if (s1 <= s0) continue;
+
+      const nn = Math.max(6, Math.ceil((s1-s0)/step) + 1);
+      ctx.beginPath();
+      for (let i=0;i<nn;i++){
+        const s = (i===nn-1) ? s1 : (s0 + i*((s1-s0)/(nn-1)));
+        const z = evalProfileZ(model, s);
+        if (!Number.isFinite(z)) continue;
+        const x = toX(s), y = toY(z);
+        if (i===0) ctx.moveTo(x,y);
+        else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // PV points
+  if (options?.showPV) {
+    ctx.fillStyle = "#111827";
+    ctx.font = "11px system-ui";
+    for (const pv of (model.pv||[])) {
+      const s = pv.sta;
+      const z = pv.z;
+      if (!Number.isFinite(s) || !Number.isFinite(z)) continue;
+      if (s < -1e-6 || s > total + 1e-6) continue;
+      const x = toX(clamp(s,0,total)), y = toY(z);
+      ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2); ctx.fill();
+
+      // label only for internal PV to keep clean
+      if (s > 1e-6 && s < total - 1e-6) {
+        const pitch = Number(options?.pitch ?? 20);
+        const label = metersToStaPitch(s, pitch, 0);
+        ctx.fillText(label, x+6, y-6);
+      }
+    }
+  }
+
+  // captions
+  ctx.fillStyle = "#334155";
+  ctx.font = "12px system-ui";
+  ctx.fillText(`Sta 0.000 – ${total.toFixed(3)} m`, x0, H-10);
+  ctx.fillText(`Z ${minZ.toFixed(3)} – ${maxZ.toFixed(3)} m`, x0, 14);
+}
+
 /* =========================
    Rendering
 ========================= */
@@ -2223,6 +2364,33 @@ viewProfile.innerHTML = `
     </div>
 
     ${profModel.warnings.map(w=>`<div class="warn">⚠ ${w}</div>`).join("")}
+
+<div class="sep"></div>
+
+<h3>縦断：簡易縦断図</h3>
+<div class="grid grid-3">
+  <div>
+    <label>図のサンプル間隔 ds(m)</label>
+    <input id="profPlotStep" type="text" inputmode="decimal" autocomplete="off" />
+    <div class="mini">小さいほど滑らか（重くなる）</div>
+  </div>
+  <div>
+    <label>表示</label>
+    <div class="grid grid-2">
+      <div><label class="mini"><input id="profShowPV" type="checkbox" /> PV点</label></div>
+      <div><label class="mini"><input id="profShowVC" type="checkbox" /> 縦断曲線</label></div>
+    </div>
+  </div>
+  <div class="mini">
+    範囲：0.000m 〜 ${res.total.toFixed(3)}m
+  </div>
+</div>
+
+<div class="canvasWrap" style="margin-top:10px;">
+  <canvas id="profileCanvas" width="980" height="340"></canvas>
+</div>
+<div class="mini" style="margin-top:8px;">※測点×標高（GL）。縦断曲線は青で強調</div>
+
   </div>
 
   <div class="card">
@@ -3224,3 +3392,5 @@ render();
 </script>
 </body>
 </html>
+
+
