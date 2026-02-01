@@ -1,10 +1,9 @@
 {
-  "name": "道路線形計算（iPadオフラインPWA）",
-  "short_name": "道路線形",
+  "name": "道路線形計算（PWA）",
+  "short_name": "線形計算",
   "start_url": "./",
-  "scope": "./",
   "display": "standalone",
-  "background_color": "#f2f6ff",
-  "theme_color": "#2563eb"
+  "background_color": "#ffffff",
+  "theme_color": "#2563eb",
+  "icons": []
 }
-
