@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.4</span></title>
+  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.6</span></title>
 
   <!-- PWA -->
   <link rel="manifest" href="./manifest.json">
@@ -146,7 +146,7 @@
 </div>
 
 <script>
-// --- diagnostics (v18.4) ---
+// --- diagnostics (v18.6) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
@@ -284,17 +284,17 @@ let state = {
     // 勾配(%)は「外側へ進むほど Z が上がる：+ / 下がる：-」で入力。
     right: {
       segs: [
-        { id: 1, end: 3.000, slopePct: -2.000 },
-        { id: 2, end: 4.500, slopePct:  0.000 },
-        { id: 3, end: 5.000, slopePct: -1.000 },
+        { id: 1, end: 3.000, mode: 'pct', slopePct: -2.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
+        { id: 2, end: 4.500, mode: 'pct', slopePct:  0.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
+        { id: 3, end: 5.000, mode: 'pct', slopePct: -1.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
       ],
       nextSegId: 4
     },
     left: {
       segs: [
-        { id: 1, end: 3.000, slopePct: -2.000 },
-        { id: 2, end: 4.500, slopePct:  0.000 },
-        { id: 3, end: 5.000, slopePct: -1.000 },
+        { id: 1, end: 3.000, mode: 'pct', slopePct: -2.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
+        { id: 2, end: 4.500, mode: 'pct', slopePct:  0.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
+        { id: 3, end: 5.000, mode: 'pct', slopePct: -1.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
       ],
       nextSegId: 4
     },
@@ -419,11 +419,17 @@ function normalizeState(s) {
   const normSide = (obj)=>{
     obj = (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
     let segs = Array.isArray(obj.segs) ? obj.segs : [];
-    segs = segs.map((r, idx)=>({
-      id: (r && Number.isFinite(r.id)) ? r.id : (idx + 1),
-      end: Number(r && r.end),
-      slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
-    })).filter(r => Number.isFinite(r.end) && r.end > 0);
+    segs = segs.map((r, idx)=>{
+      const id = (r && Number.isFinite(r.id)) ? r.id : (idx + 1);
+      const end = Number(r && r.end);
+      const slopePct = Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0;
+      const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
+      const ratioX = Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20;
+      const ratioDir = (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : (slopePct >= 0 ? 'up' : 'down');
+      const stepDz = Number.isFinite(Number(r && r.stepDz)) ? Number(r.stepDz) : 0;
+      const jpStr = (r && typeof r.jpStr === 'string') ? r.jpStr : '';
+      return { id, end, mode, slopePct, ratioX, ratioDir, stepDz, jpStr };
+    }).filter(r => Number.isFinite(r.end) && r.end > 0);
 
     segs.sort((a,b)=>a.end-b.end);
 
@@ -927,30 +933,133 @@ const xmlEscape = (s) =>
     .replace(/"/g,"&quot;")
     .replace(/'/g,"&apos;");
 
-// Cross: integrate piecewise slopes to get ΔZ at offset (m)
+
+// Cross segment helpers (v18.6)
+// mode: 'pct' uses slopePct directly, 'ratio' uses 1:X (vertical 1 : horizontal X)
+// mode: 'dz' uses slopePct but UI accepts ΔZ across the span, 'jp' accepts 「割/分/厘」入力（例: 5分 = 5%）
+const parseJpGradePct = (txt)=>{
+  let s = String(txt ?? "").trim();
+  if (!s) return NaN;
+  s = s.replace(/\s+/g,"");
+  s = s.replace(/[－−]/g,"-").replace(/[％]/g,"%");
+  let sign = 1;
+  if (s[0] === "-") { sign = -1; s = s.slice(1); }
+  // direction words (optional)
+  if (/[下降]/.test(s) || /下り/.test(s)) { sign = -1; s = s.replace(/[上下下降り下り]/g,""); }
+  else if (/上/.test(s)) { sign = 1; s = s.replace(/[上下]/g,""); }
+
+  if (s.endsWith("%")) {
+    const n = parseFloat(s.slice(0,-1).replace(/,/g,"."));
+    return Number.isFinite(n) ? sign*n : NaN;
+  }
+
+  let val = 0;
+  let matched = false;
+
+  const mW = s.match(/(\d+(?:\.\d+)?)(?:割)/);
+  if (mW) { val += parseFloat(mW[1]) * 10; matched = true; }
+
+  const mB = s.match(/(\d+(?:\.\d+)?)(?:分)/);
+  if (mB) { val += parseFloat(mB[1]) * 1; matched = true; }
+
+  const mR = s.match(/(\d+(?:\.\d+)?)(?:厘)/);
+  if (mR) { val += parseFloat(mR[1]) * 0.1; matched = true; }
+
+  if (!matched) {
+    const n = parseFloat(s.replace(/,/g,"."));
+    if (!Number.isFinite(n)) return NaN;
+    val = n;
+  }
+  return sign * val;
+};
+
+const pctToJpGradeStr = (pct)=>{
+  const p = Number(pct);
+  if (!Number.isFinite(p)) return "";
+  const sign = p < 0 ? "-" : "";
+  let a = Math.abs(p);
+  // round to 0.1% for 割/分/厘表現
+  a = Math.round(a * 10) / 10;
+  let wari = Math.floor(a / 10);
+  let rem = a - wari * 10;
+  let bun = Math.floor(rem + 1e-9);
+  let rin = Math.round((rem - bun) * 10);
+  if (rin >= 10) { rin = 0; bun += 1; }
+  if (bun >= 10) { bun = 0; wari += 1; }
+
+  let out = "";
+  if (wari > 0) out += `${wari}割`;
+  if (bun > 0 || wari > 0) out += `${bun}分`;
+  if (rin > 0) out += `${rin}厘`;
+  if (!out) out = "0分";
+  return sign + out;
+};
+
+const crossRowSlopePct = (r)=>{
+  const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
+  if (mode === 'ratio') {
+    const X = Number(r && r.ratioX);
+    if (!Number.isFinite(X) || X <= 0) return 0;
+    const dir = (r && r.ratioDir === 'up') ? 1 : -1;
+    return dir * (100.0 / X);
+  }
+  return Number(r && r.slopePct) || 0;
+};
+const crossRowStepDz = (r)=> Number(r && r.stepDz) || 0;
+
+// Cross: integrate piecewise slopes (+ optional vertical step at end) to get ΔZ at offset (m)
 const evalCrossDzAtOffset = (segs, off) => {
   off = Math.max(0, Number(off) || 0);
-  segs = (Array.isArray(segs)?segs:[]).slice().sort((a,b)=> (Number(a.end)||0) - (Number(b.end)||0));
+  segs = (Array.isArray(segs) ? segs : []).slice().sort((a,b)=>{
+    const ea = Number(a && a.end) || 0;
+    const eb = Number(b && b.end) || 0;
+    if (Math.abs(ea-eb) > 1e-12) return ea-eb;
+    return (Number(a && a.id)||0) - (Number(b && b.id)||0);
+  });
   if (!segs.length) return 0;
+
   let z = 0;
   let x0 = 0;
-  let lastSlope = Number(segs[0].slopePct)||0;
+  let lastSlope = crossRowSlopePct(segs[0]);
+
   for (const r of segs) {
-    const x1 = Number(r.end);
-    const slope = Number(r.slopePct)||0;
-    if (!Number.isFinite(x1) || x1 <= x0 + 1e-12) continue;
-    lastSlope = slope;
-    const use = Math.min(off, x1);
-    if (use > x0) z += (slope/100) * (use - x0);
-    x0 = x1;
-    if (off <= x1 + 1e-12) return z;
+    const x1 = Number(r && r.end);
+    if (!Number.isFinite(x1) || x1 < x0 - 1e-12) continue;
+
+    const slope = crossRowSlopePct(r);
+    const stepDz = crossRowStepDz(r);
+
+    // integrate slope if this row has a span
+    if (x1 > x0 + 1e-12) {
+      lastSlope = slope;
+      const use = Math.min(off, x1);
+      if (use > x0 + 1e-12) z += (slope/100.0) * (use - x0);
+
+      // If query is strictly inside the span, stop here (step is at end)
+      if (off < x1 - 1e-12) return z;
+
+      // If query is at the end (or beyond), apply step at end
+      if (Math.abs(off - x1) <= 1e-12 || off > x1 + 1e-12) {
+        if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) z += stepDz;
+      }
+
+      x0 = x1;
+      if (off <= x1 + 1e-12) return z;
+      continue;
+    }
+
+    // x1 == x0 (no span) but may have a step at this point
+    if (off >= x1 - 1e-12) {
+      if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) z += stepDz;
+    }
   }
+
   // extend beyond last end with last slope
-  if (off > x0 + 1e-12) z += (lastSlope/100) * (off - x0);
+  if (off > x0 + 1e-12) z += (lastSlope/100.0) * (off - x0);
   return z;
 };
 
-// Cross: at STA (m), choose override segments if present.
+// Cross: at STA// Cross: at STA (m), choose override segments if present.
 // If between two overrides, linearly interpolate ΔZ(off) (supports different segment structures).
 const evalCrossDzAtSta = (m, side, off) => {
   ensureCrossState();
@@ -1424,7 +1533,12 @@ const cloneCrossSide = (src)=>{
   const segs = (src?.segs || []).map((r, i)=>({
     id: i + 1,
     end: Number(r?.end) || 0,
+    mode: (r && typeof r.mode === 'string') ? r.mode : 'pct',
     slopePct: Number(r?.slopePct) || 0,
+    ratioX: Number.isFinite(Number(r?.ratioX)) ? Number(r.ratioX) : 20,
+    ratioDir: (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r?.slopePct)||0) >= 0 ? 'up' : 'down'),
+    stepDz: Number(r?.stepDz) || 0,
+    jpStr: (r && typeof r.jpStr === 'string') ? r.jpStr : '',
   })).filter(r => Number.isFinite(r.end) && r.end > 0);
   const mx = Math.max(0, ...segs.map(r=>r.id||0));
   return { segs, nextSegId: mx + 1 };
@@ -1464,11 +1578,17 @@ const normalizeCrossToOuterEnd = (store, endVal)=>{
 
   store.segs = Array.isArray(store.segs) ? store.segs.slice() : [];
   store.segs = store.segs
-    .map((r, idx)=>({
-      id: (r && Number.isFinite(r.id)) ? r.id : (idx + 1),
-      end: Number(r && r.end),
-      slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
-    }))
+    .map((r, idx)=>{
+      const id = (r && Number.isFinite(r.id)) ? r.id : (idx + 1);
+      const end = Number(r && r.end);
+      const slopePct = Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0;
+      const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
+      const ratioX = Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20;
+      const ratioDir = (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : (slopePct >= 0 ? 'up' : 'down');
+      const stepDz = Number.isFinite(Number(r && r.stepDz)) ? Number(r.stepDz) : 0;
+      const jpStr = (r && typeof r.jpStr === 'string') ? r.jpStr : '';
+      return { id, end, mode, slopePct, ratioX, ratioDir, stepDz, jpStr };
+    })
     .filter(r => Number.isFinite(r.end) && r.end > 0);
 
   store.segs.sort((a,b)=>a.end-b.end);
@@ -1477,7 +1597,7 @@ const normalizeCrossToOuterEnd = (store, endVal)=>{
   store.segs = store.segs.filter(r => r.end <= endVal + 1e-9);
 
   if (!store.segs.length) {
-    store.segs = [{ id: 1, end: Number(endVal.toFixed(3)), slopePct: 0.0 }];
+    store.segs = [{ id: 1, end: Number(endVal.toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' }];
     store.nextSegId = 2;
     return;
   }
@@ -1510,22 +1630,31 @@ const applyCrossOuterEnd = (rightEnd, leftEnd, affectOverrides)=>{
 
 const computeCrossSide = (scope, side, staKey)=>{
   const store = getCrossStore(scope, side, staKey);
-  const segs = (store.segs||[]).slice().sort((a,b)=> (Number(a.end)||0) - (Number(b.end)||0));
+  const segs = (store.segs||[]).slice().sort((a,b)=>{
+    const ea = Number(a && a.end) || 0;
+    const eb = Number(b && b.end) || 0;
+    if (Math.abs(ea-eb) > 1e-12) return ea-eb;
+    return (Number(a && a.id)||0) - (Number(b && b.id)||0);
+  });
   const warnings = [];
   let start = 0;
   let z = 0;
   const rows = [];
 
   for (const r of segs) {
-    const end = Number(r.end);
-    const slopePct = Number(r.slopePct)||0;
+    const end = Number(r && r.end);
+    const slopePct = crossRowSlopePct(r);
+    const stepDz = crossRowStepDz(r);
     if (!Number.isFinite(end) || end <= 0) { warnings.push('end<=0 の行があります'); continue; }
     const span = end - start;
     if (span < -1e-9) { warnings.push('距離が昇順ではありません'); continue; }
     if (Math.abs(span) < 1e-9) { warnings.push('同一距離(end)の行があります'); }
-    const dz = (slopePct/100.0) * span;
-    z += dz;
-    rows.push({ id: r.id, start, end, slopePct, span, dz, zEnd: z });
+
+    const dzSlope = (slopePct/100.0) * span;
+    z += dzSlope;
+    if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) z += stepDz;
+
+    rows.push({ id: r.id, start, end, mode: (r&&r.mode)||'pct', slopePct, ratioX: r?.ratioX, ratioDir: r?.ratioDir, stepDz, span, dzSlope, zEnd: z });
     start = end;
   }
   return { rows, lastEnd: start, lastZ: z, warnings };
@@ -1534,21 +1663,28 @@ const computeCrossSide = (scope, side, staKey)=>{
 
 // ---- Cross taper + preview ----
 const computeCrossRowsFromSegs = (segs)=>{
-  segs = (Array.isArray(segs)?segs:[]).slice().sort((a,b)=> (Number(a.end)||0)-(Number(b.end)||0));
+  segs = (Array.isArray(segs)?segs:[]).slice().sort((a,b)=>{
+    const ea = Number(a && a.end) || 0;
+    const eb = Number(b && b.end) || 0;
+    if (Math.abs(ea-eb) > 1e-12) return ea-eb;
+    return (Number(a && a.id)||0) - (Number(b && b.id)||0);
+  });
   const warnings = [];
   let start = 0;
   let z = 0;
   const rows = [];
   for (const r of segs) {
-    const end = Number(r.end);
-    const slopePct = Number(r.slopePct)||0;
+    const end = Number(r && r.end);
+    const slopePct = crossRowSlopePct(r);
+    const stepDz = crossRowStepDz(r);
     if (!Number.isFinite(end) || end <= 0) { warnings.push('end<=0 の行があります'); continue; }
     const span = end - start;
     if (span < -1e-9) { warnings.push('距離が昇順ではありません'); continue; }
     if (Math.abs(span) < 1e-9) { warnings.push('同一距離(end)の行があります'); }
-    const dz = (slopePct/100.0) * span;
-    z += dz;
-    rows.push({ start, end, slopePct, dz, zEnd: z });
+    const dzSlope = (slopePct/100.0) * span;
+    z += dzSlope;
+    if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) z += stepDz;
+    rows.push({ start, end, slopePct, stepDz, dzSlope, zEnd: z });
     start = end;
   }
   return { rows, lastEnd: start, lastZ: z, warnings };
@@ -1596,7 +1732,12 @@ const getCrossWidthAt = (m, side)=>{
 };
 
 const widenCrossSegsFromCommon = (commonSegs, targetW, anchor)=>{
-  commonSegs = (Array.isArray(commonSegs)?commonSegs:[]).slice().sort((a,b)=> (Number(a.end)||0)-(Number(b.end)||0));
+  commonSegs = (Array.isArray(commonSegs)?commonSegs:[]).slice().sort((a,b)=>{
+    const ea = Number(a && a.end) || 0;
+    const eb = Number(b && b.end) || 0;
+    if (Math.abs(ea-eb) > 1e-12) return ea-eb;
+    return (Number(a && a.id)||0) - (Number(b && b.id)||0);
+  });
   const base = computeCrossRowsFromSegs(commonSegs);
   const baseW = base.lastEnd || 0;
   targetW = Number(targetW);
@@ -1609,30 +1750,42 @@ const widenCrossSegsFromCommon = (commonSegs, targetW, anchor)=>{
   if (targetW < anchor) targetW = anchor;
 
   const delta = targetW - baseW;
+
+  const cloneSeg = (src, end, keepStep)=>({
+    end: Number(end),
+    mode: (src && typeof src.mode === 'string') ? src.mode : 'pct',
+    slopePct: Number(src && src.slopePct) || 0,
+    ratioX: Number.isFinite(Number(src && src.ratioX)) ? Number(src.ratioX) : 20,
+    ratioDir: (src && (src.ratioDir === 'up' || src.ratioDir === 'down')) ? src.ratioDir : ((Number(src && src.slopePct)||0) >= 0 ? 'up' : 'down'),
+    stepDz: keepStep ? (Number(src && src.stepDz) || 0) : 0,
+    jpStr: (src && typeof src.jpStr === 'string') ? src.jpStr : '',
+  });
+
   if (Math.abs(delta) < 1e-9) {
     // 念のため最後を targetW に合わせる
-    const out = commonSegs.map((r,i)=>({ id: i+1, end: Number(r.end), slopePct: Number(r.slopePct)||0 }));
+    const out = commonSegs
+      .filter(r=>Number.isFinite(Number(r && r.end)) && Number(r.end) > 0)
+      .map(r=>cloneSeg(r, Number(r.end), true));
     if (out.length) out[out.length-1].end = Number(targetW.toFixed(3));
-    return out;
+    return out.map((r,i)=>Object.assign({ id: i+1 }, r));
   }
 
   const out = [];
   let start = 0;
   for (const r of commonSegs) {
-    const end = Number(r.end);
-    const slopePct = Number(r.slopePct)||0;
-    if (!Number.isFinite(end) || end <= 0) continue;
+    const end0 = Number(r && r.end);
+    if (!Number.isFinite(end0) || end0 <= 0) continue;
 
-    if (end <= anchor + 1e-9) {
-      out.push({ end, slopePct });
-    } else if (start < anchor - 1e-9 && end > anchor + 1e-9) {
-      // cross anchor -> split
-      out.push({ end: anchor, slopePct });
-      out.push({ end: end + delta, slopePct });
+    if (end0 <= anchor + 1e-9) {
+      out.push(cloneSeg(r, end0, true));
+    } else if (start < anchor - 1e-9 && end0 > anchor + 1e-9) {
+      // cross anchor -> split (step at original end belongs to the outer piece)
+      out.push(cloneSeg(r, anchor, false));
+      out.push(cloneSeg(r, end0 + delta, true));
     } else {
-      out.push({ end: end + delta, slopePct });
+      out.push(cloneSeg(r, end0 + delta, true));
     }
-    start = end;
+    start = end0;
   }
 
   // 0以下/逆転を除去しつつ、targetW でトリム
@@ -1643,18 +1796,18 @@ const widenCrossSegsFromCommon = (commonSegs, targetW, anchor)=>{
     if (!Number.isFinite(e)) continue;
     if (e <= last + 1e-9) continue;
     if (e > targetW + 1e-9) continue;
-    cleaned.push({ end: e, slopePct: Number(r.slopePct)||0 });
+    cleaned.push(Object.assign({}, r, { end: e }));
     last = e;
   }
 
   if (!cleaned.length) {
-    cleaned.push({ end: Number(targetW.toFixed(3)), slopePct: 0.0 });
+    cleaned.push({ end: Number(targetW.toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' });
   } else {
     const prevEnd = (cleaned.length>=2) ? cleaned[cleaned.length-2].end : 0;
     cleaned[cleaned.length-1].end = Number(Math.max(targetW, prevEnd).toFixed(3));
   }
 
-  return cleaned.map((r,i)=>({ id: i+1, end: Number(r.end), slopePct: Number(r.slopePct)||0 }));
+  return cleaned.map((r,i)=>Object.assign({ id: i+1 }, r));
 };
 
 const getEffectiveCrossSegsAt = (m, side)=>{
@@ -1768,9 +1921,9 @@ const drawCrossPreviewCanvas = (canvas, pts, labels)=>{
 const setCrossExample = (scope, side, staKey)=>{
   const store = getCrossStore(scope, side, staKey);
   store.segs = [
-    { id: 1, end: 3.000, slopePct: -2.000 },
-    { id: 2, end: 4.500, slopePct:  0.000 },
-    { id: 3, end: 5.000, slopePct: -1.000 },
+    { id: 1, end: 3.000, mode: 'pct', slopePct: -2.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
+    { id: 2, end: 4.500, mode: 'pct', slopePct:  0.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
+    { id: 3, end: 5.000, mode: 'pct', slopePct: -1.000, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' },
   ];
   store.nextSegId = 4;
   saveState();
@@ -1790,7 +1943,7 @@ const bindCrossSlopeUI = (rootEl)=>{
       addBtn.onclick = ()=>{
         const store = getCrossStore(scope, side, staKey);
         const last = Math.max(0, ...(store.segs||[]).map(r=>Number(r.end)||0));
-        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), slopePct: 0.0 });
+        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', stepDz: 0, jpStr: '' });
         sortCrossSegs(scope, side, staKey);
         saveState();
         render();
@@ -1832,6 +1985,43 @@ const bindCrossSlopeUI = (rootEl)=>{
       inp.onblur = commit;
     });
 
+    // mode select
+    rootEl.querySelectorAll(`select[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-mode]`).forEach(selEl=>{
+      const id = parseInt(selEl.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const v = String(e.target.value||'pct');
+        if (v === 'ratio') r.mode = 'ratio';
+        else if (v === 'dz') r.mode = 'dz';
+        else if (v === 'jp') r.mode = 'jp';
+        else r.mode = 'pct';
+
+        if (!Number.isFinite(Number(r.ratioX))) r.ratioX = 20;
+
+        // For 割分モード: 文字列が空なら現在の%から初期表示を作る
+        if (r.mode === 'jp') {
+          if (typeof r.jpStr !== 'string' || !r.jpStr.trim()) r.jpStr = pctToJpGradeStr(r.slopePct);
+        } else {
+          if (typeof r.jpStr !== 'string') r.jpStr = '';
+        }
+
+        if (r.mode === 'ratio') {
+          // keep direction, compute slopePct for compatibility
+          if (r.ratioDir !== 'up' && r.ratioDir !== 'down') r.ratioDir = (Number(r.slopePct)||0) >= 0 ? 'up' : 'down';
+          const X = Number(r.ratioX)||20;
+          const dir = (r.ratioDir === 'up') ? 1 : -1;
+          r.slopePct = dir * (100.0 / Math.max(1e-9, X));
+        }
+        saveState();
+        render();
+      };
+      selEl.onchange = commit;
+      selEl.onblur = commit;
+    });
+
+    // % slope input (when mode=pct)
     rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-slope]`).forEach(inp=>{
       const id = parseInt(inp.getAttribute('data-xs-id'),10);
       const commit = (e)=>{
@@ -1842,12 +2032,157 @@ const bindCrossSlopeUI = (rootEl)=>{
         if (t === "") { render(); return; }
         const n = parseFloat(t.replace(/,/g,"."));
         if (!Number.isFinite(n)) { render(); return; }
+        r.mode = 'pct';
         r.slopePct = n;
         saveState();
         render();
       };
       inp.onchange = commit;
       inp.onblur = commit;
+    });
+
+
+
+    // ΔZ input (when mode=dz): user enters ΔZ across this span, we convert to slopePct
+    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-dz]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const t = String(e.target.value ?? "").trim();
+        if (t === "") { render(); return; }
+        const dz = parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(dz)) { render(); return; }
+
+        // find span (start..end) for this id
+        const arr = (store.segs||[]).slice().sort((a,b)=> (Number(a.end)||0) - (Number(b.end)||0));
+        let start = 0;
+        let span = NaN;
+        for (const rr of arr) {
+          const end = Number(rr && rr.end);
+          if (!Number.isFinite(end) || end <= 0) continue;
+          const sp = end - start;
+          if (rr.id === id) { span = sp; break; }
+          start = end;
+        }
+        if (!(span > 1e-9)) {
+          alert('この区間の長さが0のため、ΔZから%へ換算できません');
+          render();
+          return;
+        }
+
+        r.mode = 'dz';
+        r.slopePct = (dz / span) * 100.0;
+        saveState();
+        render();
+      };
+      inp.onchange = commit;
+      inp.onblur = commit;
+    });
+
+    // 割分 input (when mode=jp): parse "1割5分" etc -> slopePct
+    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-jp]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const t = String(e.target.value ?? "").trim();
+        if (t === "") { render(); return; }
+        const pct = parseJpGradePct(t);
+        if (!Number.isFinite(pct)) {
+          alert('割分入力が解析できません（例：5分 / 1割5分 / -5分）');
+          render();
+          return;
+        }
+        r.mode = 'jp';
+        r.jpStr = t;
+        r.slopePct = pct;
+        saveState();
+        render();
+      };
+      inp.onchange = commit;
+      inp.onblur = commit;
+    });
+
+    // ratio X input
+    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-ratiox]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const t = String(e.target.value ?? "").trim();
+        if (t === "") { render(); return; }
+        const n = parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(n) || n <= 0) { render(); return; }
+        r.mode = 'ratio';
+        r.ratioX = n;
+        if (r.ratioDir !== 'up' && r.ratioDir !== 'down') r.ratioDir = 'down';
+        const dir = (r.ratioDir === 'up') ? 1 : -1;
+        r.slopePct = dir * (100.0 / Math.max(1e-9, n));
+        saveState();
+        render();
+      };
+      inp.onchange = commit;
+      inp.onblur = commit;
+    });
+
+    // ratio direction
+    rootEl.querySelectorAll(`select[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-ratiodir]`).forEach(selEl=>{
+      const id = parseInt(selEl.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const v = String(e.target.value||'down');
+        r.mode = 'ratio';
+        r.ratioDir = (v === 'up') ? 'up' : 'down';
+        const X = Number(r.ratioX) || 20;
+        const dir = (r.ratioDir === 'up') ? 1 : -1;
+        r.slopePct = dir * (100.0 / Math.max(1e-9, X));
+        saveState();
+        render();
+      };
+      selEl.onchange = commit;
+      selEl.onblur = commit;
+    });
+
+    // step abs input
+    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepabs]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const t = String(e.target.value ?? "").trim();
+        const abs = (t === "") ? 0 : parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(abs) || abs < 0) { render(); return; }
+        const dir = (r.stepDz != null && Number(r.stepDz) < 0) ? -1 : 1;
+        r.stepDz = dir * abs;
+        saveState();
+        render();
+      };
+      inp.onchange = commit;
+      inp.onblur = commit;
+    });
+
+    // step direction
+    rootEl.querySelectorAll(`select[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepdir]`).forEach(selEl=>{
+      const id = parseInt(selEl.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const v = String(e.target.value||'up');
+        const abs = Math.abs(Number(r.stepDz)||0);
+        r.stepDz = (v === 'down') ? -abs : abs;
+        saveState();
+        render();
+      };
+      selEl.onchange = commit;
+      selEl.onblur = commit;
     });
 
     rootEl.querySelectorAll(`button[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-del]`).forEach(btn=>{
@@ -3675,11 +4010,16 @@ bindExtraUI("profile", viewProfile, pitch);
 
   const crossRowsHtml = (scope, side, staKey)=>{
     const store = getCrossStore(scope, side, staKey);
-    const segs = store.segs || [];
+    const segs = (store.segs||[]).slice().sort((a,b)=>{
+      const ea = Number(a && a.end) || 0;
+      const eb = Number(b && b.end) || 0;
+      if (Math.abs(ea-eb) > 1e-12) return ea-eb;
+      return (Number(a && a.id)||0) - (Number(b && b.id)||0);
+    });
     const staAttr = (scope === "ovr" && staKey) ? ` data-xs-sta="${staKey}"` : "";
 
     if (!segs.length) {
-      return `<tr><td colspan="6" class="mini">（まだ区間がありません）</td></tr>`;
+      return `<tr><td colspan="9" class="mini">（まだ区間がありません）</td></tr>`;
     }
 
     let start = 0;
@@ -3688,17 +4028,67 @@ bindExtraUI("profile", viewProfile, pitch);
 
     for (const r of segs) {
       const end = Number(r.end);
-      const slopePct = Number(r.slopePct)||0;
+      const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
+      const ratioX = Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20;
+      const ratioDir = (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r && r.slopePct)||0) >= 0 ? 'up' : 'down');
+      const slopePctRaw = Number(r && r.slopePct)||0;
+      const slopePct = crossRowSlopePct(r);
+      const stepDz = crossRowStepDz(r);
+      const stepAbs = Math.abs(Number(stepDz)||0);
+      const stepDir = (Number(stepDz)||0) >= 0 ? 'up' : 'down';
+      const jpStr = (r && typeof r.jpStr === 'string') ? r.jpStr : '';
       const span = (Number.isFinite(end) ? (end - start) : NaN);
-      const dz = Number.isFinite(span) ? (slopePct/100.0)*span : NaN;
-      if (Number.isFinite(dz)) z += dz;
+      const dzSlope = Number.isFinite(span) ? (slopePct/100.0)*span : NaN;
+      if (Number.isFinite(dzSlope)) z += dzSlope;
+      if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) z += stepDz;
 
       out.push(`
         <tr>
           <td class="right">${start.toFixed(3)}</td>
           <td><input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-end type="number" step="0.001" value="${Number.isFinite(end)?end:0}" /></td>
-          <td><input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-slope type="number" step="0.001" value="${slopePct}" /></td>
-          <td class="right">${Number.isFinite(dz)?dz.toFixed(3):""}</td>
+          <td>
+            <select data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-mode>
+  <option value="pct" ${mode==='pct'?'selected':''}>%勾配</option>
+  <option value="ratio" ${mode==='ratio'?'selected':''}>1:X</option>
+  <option value="dz" ${mode==='dz'?'selected':''}>高低差ΔZ</option>
+  <option value="jp" ${mode==='jp'?'selected':''}>割分</option>
+</select>
+          </td>
+          <td>
+            ${mode==='ratio' ? `
+              <div class="row" style="gap:6px; align-items:center;">
+                <span>1:</span>
+                <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-ratiox type="number" step="0.001" min="0" value="${ratioX.toFixed(3)}" style="width:110px;" />
+                <select data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-ratiodir>
+                  <option value="up" ${ratioDir==='up'?'selected':''}>上がり</option>
+                  <option value="down" ${ratioDir==='down'?'selected':''}>下がり</option>
+                </select>
+              </div>
+              <div class="mini">換算：${slopePct.toFixed(3)}%（例：5%は 1:20）</div>
+            ` : mode==='dz' ? `
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-dz type="number" step="0.001" value="${Number.isFinite(dzSlope)?dzSlope.toFixed(3):'0.000'}" />
+              <div class="mini">（この区間の高低差：+上がり / -下がり）</div>
+              <div class="mini">換算：${slopePct.toFixed(3)}%（例：5%は 1:20）</div>
+            ` : mode==='jp' ? `
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-jp type="text" value="${xmlEscape(jpStr)}" placeholder="例：5分 / 1割5分 / -5分" />
+              <div class="mini">換算：${slopePct.toFixed(3)}%（例：5%は 1:20）</div>
+            ` : `
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-slope type="number" step="0.001" value="${slopePctRaw.toFixed(3)}" />
+              <div class="mini">（+上がり / -下がり）</div>
+            `}
+          </td>
+          <td>
+            <div class="row" style="gap:6px; align-items:center;">
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepabs type="number" step="0.001" min="0" value="${stepAbs.toFixed(3)}" style="width:110px;" />
+              <select data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepdir>
+                <option value="up" ${stepDir==='up'?'selected':''}>上</option>
+                <option value="down" ${stepDir==='down'?'selected':''}>下</option>
+              </select>
+            </div>
+            <div class="mini">段差（この終了点で瞬時に反映）</div>
+          </td>
+          <td class="right">${Number.isFinite(dzSlope)?dzSlope.toFixed(3):""}</td>
+          <td class="right">${Number.isFinite(stepDz)?stepDz.toFixed(3):""}</td>
           <td class="right">${Number.isFinite(z)?z.toFixed(3):""}</td>
           <td class="right"><button class="btn btn-ghost" data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-del="${r.id}">削除</button></td>
         </tr>
@@ -3767,7 +4157,7 @@ bindExtraUI("profile", viewProfile, pitch);
           <div class="pill">右側（+） 共通（全測点）</div>
           <div style="overflow:auto; margin-top:8px;">
             <table>
-              <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>勾配(%)</th><th class="right">ΔZ(m)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
+              <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>方式</th><th>入力</th><th>段差ΔZ(m)</th><th class="right">ΔZ(勾配)</th><th class="right">ΔZ(段差)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
               <tbody>${crossRowsHtml("common", "right")}</tbody>
             </table>
           </div>
@@ -3784,7 +4174,7 @@ bindExtraUI("profile", viewProfile, pitch);
           <div class="pill">左側（-） 共通（全測点）</div>
           <div style="overflow:auto; margin-top:8px;">
             <table>
-              <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>勾配(%)</th><th class="right">ΔZ(m)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
+              <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>方式</th><th>入力</th><th>段差ΔZ(m)</th><th class="right">ΔZ(勾配)</th><th class="right">ΔZ(段差)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
               <tbody>${crossRowsHtml("common", "left")}</tbody>
             </table>
           </div>
@@ -3849,7 +4239,7 @@ bindExtraUI("profile", viewProfile, pitch);
             <div class="pill">右側（+） 例外 @ ${metersToStaPitch(Number(selKey), pitch, 3)} (${selKey}m)</div>
             <div style="overflow:auto; margin-top:8px;">
               <table>
-                <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>勾配(%)</th><th class="right">ΔZ(m)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
+                <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>方式</th><th>入力</th><th>段差ΔZ(m)</th><th class="right">ΔZ(勾配)</th><th class="right">ΔZ(段差)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
                 <tbody>${crossRowsHtml("ovr", "right", selKey)}</tbody>
               </table>
             </div>
@@ -3866,7 +4256,7 @@ bindExtraUI("profile", viewProfile, pitch);
             <div class="pill">左側（-） 例外 @ ${metersToStaPitch(Number(selKey), pitch, 3)} (${selKey}m)</div>
             <div style="overflow:auto; margin-top:8px;">
               <table>
-                <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>勾配(%)</th><th class="right">ΔZ(m)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
+                <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>方式</th><th>入力</th><th>段差ΔZ(m)</th><th class="right">ΔZ(勾配)</th><th class="right">ΔZ(段差)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
                 <tbody>${crossRowsHtml("ovr", "left", selKey)}</tbody>
               </table>
             </div>
@@ -4100,7 +4490,12 @@ bindExtraUI("profile", viewProfile, pitch);
     if (tblEl) {
       const mk = m.toFixed(3);
       const rowsToHtml = (calc, sideName)=>{
-        const lines = calc.rows.map(r=>`${r.start.toFixed(3)}→${r.end.toFixed(3)} : ${r.slopePct.toFixed(3)}% (Z=${r.zEnd.toFixed(3)})`);
+        const lines = calc.rows.map(r=>{
+          const stepTxt = (r.stepDz && Math.abs(r.stepDz) > 0)
+            ? (` / step ${r.stepDz > 0 ? '+' : ''}${r.stepDz.toFixed(3)}m`)
+            : '';
+          return `${r.start.toFixed(3)}→${r.end.toFixed(3)} : ${r.slopePct.toFixed(3)}%${stepTxt} (Z=${r.zEnd.toFixed(3)})`;
+        });
         return `<div style="margin-top:6px;"><b>${sideName}</b><br/>${lines.join('<br/>')}</div>`;
       };
       tblEl.innerHTML = rowsToHtml(lCalc,'左(-)') + rowsToHtml(rCalc,'右(+)');
@@ -4546,7 +4941,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         </div>
       </div>
       <div class="mini" style="margin-top:10px;">
-        更新が反映されないとき：<b>sw.js の CACHE_NAME を v18-1（例：road-align-v18-1）</b> に上げると確実です。
+        更新が反映されないとき：<b>sw.js の CACHE_NAME を v18-6（例：road-align-v18-6）</b> に上げると確実です。
       </div>
     </div>
   `;
