@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.3</span></title>
+  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.4</span></title>
 
   <!-- PWA -->
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_3");
+      navigator.serviceWorker.register("./sw.js?v=18_4");
     }
   </script>
 
@@ -146,7 +146,7 @@
 </div>
 
 <script>
-// --- diagnostics (v18.3) ---
+// --- diagnostics (v18.4) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
@@ -177,7 +177,7 @@ const LS_KEY = LS_KEY_NEW;
 
 // --- UI state (header collapse) ---
 const UI_KEY = "road_align_pwa_ui_v1";
-let uiState = { headerCollapsed: false };
+let uiState = { headerCollapsed: false, coordSearch: "" };
 try {
   const raw = localStorage.getItem(UI_KEY);
   if (raw) uiState = Object.assign(uiState, JSON.parse(raw));
@@ -208,6 +208,9 @@ let state = {
   outputStep: 20,
   dsSpiral: 0.5,
   clothoidMode: "A",
+  // 座標一覧（CSV取り込み）
+  coordCatalog: { items: [], lastFile: "", lastLoadedAt: "" },
+
 
   bp: { name: "BP", N: 0, E: 0 },
   ep: { name: "EP", N: 0, E: 500 },
@@ -460,10 +463,254 @@ if (!Number.isFinite(s.profilePlotStep)) s.profilePlotStep = 5.0;
 if (typeof s.profileShowPV !== "boolean") s.profileShowPV = true;
 if (typeof s.profileShowVC !== "boolean") s.profileShowVC = true;
 
+  // --- coordCatalog (CSV coordinate list) ---
+  if (!s.coordCatalog || typeof s.coordCatalog !== "object" || Array.isArray(s.coordCatalog)) {
+    s.coordCatalog = { items: [], lastFile: "", lastLoadedAt: "" };
+  }
+  if (!Array.isArray(s.coordCatalog.items)) s.coordCatalog.items = [];
+  s.coordCatalog.items = s.coordCatalog.items.map((r)=>({
+    name: String(r && r.name != null ? r.name : "").replace(/^﻿/,"").trim(),
+    N: Number(r && r.N),
+    E: Number(r && r.E),
+    Z: (r && (r.Z === "" || r.Z == null)) ? null : Number(r && r.Z),
+  })).filter(r => r.name && Number.isFinite(r.N) && Number.isFinite(r.E)).slice(0, 5000);
+  if (typeof s.coordCatalog.lastFile !== "string") s.coordCatalog.lastFile = "";
+  if (typeof s.coordCatalog.lastLoadedAt !== "string") s.coordCatalog.lastLoadedAt = "";
+
+
 
 
 
   return s;
+}
+
+/* =======================
+   PLAN IMPORT (SIMA / XRF)
+   ======================= */
+
+let planImportMsgText = "";
+function escHtml(s){
+  return String(s??"").replace(/[&<>"\']/g, (c)=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","\'":"&#39;"
+  }[c]));
+}
+
+// read local file with proper encoding (SIMA is often Shift-JIS)
+async function readLocalFileText(file){
+  const ab = await file.arrayBuffer();
+  const u8 = new Uint8Array(ab);
+  const name = String(file.name || "").toLowerCase();
+  const ext = name.includes(".") ? name.split(".").pop() : "";
+  const tryDec = (label)=>{
+    try { return new TextDecoder(label).decode(u8); } catch(e){ return null; }
+  };
+
+  if (ext === "sim") {
+    return tryDec("shift_jis") || tryDec("shift-jis") || tryDec("sjis") || tryDec("utf-8") || new TextDecoder().decode(u8);
+  }
+  // xrf is UTF-8 xml in practice
+  return tryDec("utf-8") || tryDec("shift_jis") || new TextDecoder().decode(u8);
+}
+
+function parseSimaA01Points(text){
+  const pts = [];
+  const lines = String(text||"").split(/\r?\n/);
+  for (const ln0 of lines){
+    const ln = ln0.trim();
+    if (!ln || ln.startsWith("Z") || ln.startsWith("G") || ln.startsWith("A00")) continue;
+    if (!ln.startsWith("A01")) continue;
+    // CSV-ish: A01,   26,IP.1           ,25196.601780,13374.111999,    0.000,
+    const cols = ln.split(",").map(s=>s.trim());
+    if (cols.length < 6) continue;
+    const name = (cols[2]||"").replace(/\s+/g," ").trim();
+    const x = parseFloat(String(cols[3]||"").replace(/,/g,"."));
+    const y = parseFloat(String(cols[4]||"").replace(/,/g,"."));
+    const z = parseFloat(String(cols[5]||"").replace(/,/g,"."));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    const no = parseInt(String(cols[1]||"").replace(/[^\d\-]/g,""),10);
+    pts.push({ name, x, y, z: Number.isFinite(z)?z:0, no: Number.isFinite(no)?no:null });
+  }
+  // sort by point number if present
+  pts.sort((a,b)=>{
+    if (a.no!=null && b.no!=null) return a.no-b.no;
+    return 0;
+  });
+  return pts;
+}
+
+function pickBpEpFromPoints(pts){
+  const normName = (s)=>String(s||"").toUpperCase().replace(/\s+/g,"").replace(/_/g,"");
+  let bp = null, ep = null;
+
+  // BP: exact "BP" if exists
+  bp = pts.find(p => normName(p.name) === "BP") || null;
+
+  // EP: exact "EP" or "*.EP"
+  const isEp = (p)=>{
+    const n = normName(p.name);
+    if (n === "EP") return true;
+    if (n.endsWith(".EP")) return true;
+    // avoid EBC/KEE etc
+    if (n.includes("EBC") || n.includes("KEE") || n.includes("KAE")) return false;
+    return /(^|[.\-])EP$/.test(n);
+  };
+  ep = pts.find(isEp) || null;
+
+  if (!bp && pts.length) bp = pts[0];
+  if (!ep && pts.length) ep = pts[pts.length-1];
+
+  return { bp, ep };
+}
+
+function extractIpPointsFromSima(pts){
+  const ip = pts
+    .filter(p => /^IP[\.\d]/i.test(p.name.trim()) || /^IP\./i.test(p.name.trim()))
+    .map(p=>{
+      // id by suffix number if any
+      const m = p.name.match(/IP\.?\s*([0-9]+)/i);
+      const id = m ? parseInt(m[1],10) : null;
+      return { id, name: p.name.trim().replace(/\s+/g," "), N: p.x, E: p.y };
+    });
+
+  // unique by name
+  const seen = new Set();
+  const uniq = [];
+  for (const p of ip){
+    const k = p.name;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(p);
+  }
+  uniq.sort((a,b)=>{
+    if (a.id!=null && b.id!=null) return a.id-b.id;
+    if (a.id!=null) return -1;
+    if (b.id!=null) return 1;
+    return a.name.localeCompare(b.name);
+  });
+  // ensure ids sequential
+  return uniq.map((p,i)=>({ id: i+1, name: `IP${i+1}`, N: p.N, E: p.E, srcName: p.name }));
+}
+
+// parse XRF (RoadGM) and return {bp,ep,ips,curveSettings?,staPitch?}
+function parseXrfRoadGM(xmlText){
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xmlText, "application/xml");
+  const pe = doc.getElementsByTagName("parsererror");
+  if (pe && pe.length) throw new Error("XRF(XML)の解析に失敗しました（parsererror）");
+
+  const all = Array.from(doc.getElementsByTagName("*"));
+
+  const pis = all
+    .filter(el => el.localName === "PI" && el.parentElement && el.parentElement.localName === "PIs")
+    .map(el => ({
+      name: el.getAttribute("Name") || "",
+      x: parseFloat(el.getAttribute("x")),
+      y: parseFloat(el.getAttribute("y")),
+    }))
+    .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+  if (pis.length < 2) throw new Error("XRFからPI(BP/EP)が取得できませんでした");
+
+  const bp = { name: "BP", N: pis[0].x, E: pis[0].y, srcName: pis[0].name };
+  const ep = { name: "EP", N: pis[pis.length-1].x, E: pis[pis.length-1].y, srcName: pis[pis.length-1].name };
+
+  const ips = pis.slice(1, -1).map((p,i)=>({
+    id: i+1,
+    name: `IP${i+1}`,
+    N: p.x,
+    E: p.y,
+    srcName: p.name
+  }));
+
+  // station pitch
+  let staPitch = null;
+  const interval = all.find(el => el.localName === "Interval" && el.parentElement && el.parentElement.localName === "StationEquation");
+  if (interval) {
+    const sub = parseFloat(interval.getAttribute("Sub"));
+    if (Number.isFinite(sub) && sub > 0) staPitch = sub;
+  }
+
+  // curve settings (best-effort)
+  const gmEls = all.filter(el => el.localName === "GmElement");
+  const byRef = new Map();
+  for (const ge of gmEls){
+    const ref = ge.getAttribute("RefPI") || "";
+    if (!ref) continue;
+    const kids = Array.from(ge.children || []);
+    const curve = kids.find(k=>k.localName==="Curve");
+    const clothoid = kids.find(k=>k.localName==="Clothoid");
+    const rec = byRef.get(ref) || { curves: [], clothoids: [] };
+    if (curve){
+      const radius = parseFloat(curve.getAttribute("Radius"));
+      const dir = (curve.getAttribute("Direction")||"").toLowerCase();
+      const len = parseFloat(curve.getAttribute("Length"));
+      if (Number.isFinite(radius) && radius>0) rec.curves.push({ radius, dir, len: Number.isFinite(len)?len:null });
+    }
+    if (clothoid){
+      const A = parseFloat(clothoid.getAttribute("A"));
+      const dir = (clothoid.getAttribute("Direction")||"").toLowerCase();
+      const len = parseFloat(clothoid.getAttribute("Length"));
+      if (Number.isFinite(A) && A>=0) rec.clothoids.push({ A, dir, len: Number.isFinite(len)?len:null });
+    }
+    byRef.set(ref, rec);
+  }
+
+  const curveSettings = [];
+  for (const ip of ips){
+    const rec = byRef.get(ip.srcName);
+    if (!rec || !rec.curves.length) continue;
+
+    // pick the longest curve if multiple
+    const c = rec.curves
+      .slice()
+      .sort((a,b)=>(b.len||0)-(a.len||0))[0];
+
+    const dir = c.dir === "ccw" ? "left" : c.dir === "cw" ? "right" : "auto";
+
+    // A1/A2 from clothoids (take first 2 by length)
+    let A1 = 0, A2 = 0;
+    if (rec.clothoids && rec.clothoids.length){
+      const cs = rec.clothoids.slice().sort((a,b)=>(b.len||0)-(a.len||0));
+      A1 = cs[0].A || 0;
+      A2 = (cs[1]?.A ?? A1) || 0;
+    }
+
+    curveSettings.push({ id: curveSettings.length+1, ipName: ip.name, R: c.radius, A1, A2, direction: dir, ds: state.dsSpiral || 0.5 });
+  }
+
+  return { bp, ep, ips, curveSettings, staPitch };
+}
+
+function applyPlanImport(result, mode, msgText){
+  planImportMsgText = msgText || "";
+  // mode: "xrf" or "sim"
+  state.bp = { name: "BP", N: result.bp.N, E: result.bp.E };
+  state.ep = { name: "EP", N: result.ep.N, E: result.ep.E };
+  state.ipPoints = result.ips.map(p=>({ id: p.id, name: p.name, N: p.N, E: p.E }));
+  state.useIpCount = state.ipPoints.length;
+
+
+  if (mode === "xrf") {
+    if (Array.isArray(result.curveSettings) && result.curveSettings.length){
+      state.curveSettings = result.curveSettings;
+    } else {
+      // keep existing but align ipName if possible
+      state.curveSettings = [];
+    }
+    if (Number.isFinite(result.staPitch) && result.staPitch>0){
+      state.staPitch = Math.round(result.staPitch);
+      state.outputStep = Math.round(result.staPitch);
+    }
+  } else {
+    // SIMA: we can import geometry points, but curve settings are not guaranteed
+    state.curveSettings = [];
+  }
+
+  // enforce IP1..IPn naming (no gaps)
+  renumberIpsNoGaps();
+
+  saveState();
+  render();
 }
 
 function loadState() {
@@ -525,6 +772,66 @@ const csvEscape = (v) => {
   const s = String(v ?? "");
   return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
+
+
+// ---- Coordinate CSV (名称,X座標,Y座標,Z標高) ----
+function parseCoordCsv(text){
+  const raw = String(text ?? "").replace(/^\uFEFF/, "");
+  const lines = raw.split(/\r?\n/).map(l=>l.trim()).filter(l=>l);
+  if (!lines.length) return [];
+  const splitCols = (ln)=> ln.split(',').map(s=>String(s).trim());
+  let start = 0;
+  const c0 = splitCols(lines[0]);
+  if ((c0[0]||"").includes('名称') || (c0[0]||"").toLowerCase().includes('name')) start = 1;
+
+  const items = [];
+  for (let i=start; i<lines.length; i++){
+    const cols = splitCols(lines[i]);
+    if (cols.length < 3) continue;
+    const name = (cols[0]||"").replace(/^\uFEFF/,"").trim();
+    if (!name) continue;
+    const x = parseFloat(String(cols[1]||"").replace(/,/g,'.')); // X=Northing
+    const y = parseFloat(String(cols[2]||"").replace(/,/g,'.')); // Y=Easting
+    const z = parseFloat(String((cols[3] ?? "")).replace(/,/g,'.'));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    items.push({ name, N:x, E:y, Z: Number.isFinite(z) ? z : null });
+  }
+  return items;
+}
+
+// ---- IP renumber: no gaps (IP1..IPn) and keep curveSettings linked by order ----
+function renumberIpsNoGaps(){
+  const oldNames = state.ipPoints.map(p=>p && p.name ? String(p.name) : "");
+  const nameToIdx = new Map();
+  oldNames.forEach((nm, idx)=>{ if(nm) nameToIdx.set(nm, idx); });
+
+  // rename IPs in current order
+  state.ipPoints.forEach((p, idx)=>{
+    p.id = idx + 1;
+    p.name = `IP${idx+1}`;
+  });
+
+  // keep useIpCount valid
+  state.useIpCount = Math.max(0, Math.min(state.useIpCount, state.ipPoints.length));
+
+  // curveSettings: remap ipName using old order
+  if (!Array.isArray(state.curveSettings)) state.curveSettings = [];
+  const newCurves = [];
+  for (const c of state.curveSettings){
+    const old = String(c && c.ipName ? c.ipName : "");
+    let idx = nameToIdx.get(old);
+    if (idx == null){
+      // fallback: if old is like IP2 etc
+      const m = /^IP(\d+)$/.exec(old);
+      if (m) idx = Math.max(0, parseInt(m[1],10)-1);
+    }
+    if (idx == null || idx < 0 || idx >= state.ipPoints.length) continue;
+    const nc = Object.assign({}, c, { ipName: `IP${idx+1}` });
+    newCurves.push(nc);
+  }
+  // normalize curve IDs
+  state.curveSettings = newCurves.map((c, i)=>Object.assign({}, c, { id: i+1 }));
+}
 
 const downloadText = (text, filename, mime="text/plain;charset=utf-8") => {
   const blob = new Blob([text], { type: mime });
@@ -2322,8 +2629,77 @@ const render = () => {
   }
   const pitch = Math.max(1, Math.floor(state.staPitch||1));
 
+
+  // coord catalog (CSV)
+  const catalogAll = (state.coordCatalog && Array.isArray(state.coordCatalog.items)) ? state.coordCatalog.items : [];
+  const catalogRows = catalogAll.map((r, i)=>Object.assign({_i:i}, r));
+  const qCoord = String(uiState.coordSearch||"").trim().toLowerCase();
+  const catalogFiltered = qCoord ? catalogRows.filter(r=>String(r.name||"").toLowerCase().includes(qCoord)) : catalogRows;
+  const catalogShown = catalogFiltered.slice(0, 200);
+
   /* -------- PLAN -------- */
   viewPlan.innerHTML = `
+
+    <div class="card" id="secPlanImport">
+      <h2>平面線形の読み込み（SIMA / XRF）</h2>
+      <div class="grid grid-2">
+        <div>
+          <label>ファイル（.sim / .xrf）</label>
+          <input id="planImportFile" type="file" accept=".sim,.xrf,application/xml,text/xml,text/plain" />
+          <div class="mini">SIMA(.sim)は点名からBP/IP/EPの座標を読み込みます（曲線設定は空）。XRF(.xrf)はBP/IP/EPと曲線設定を可能な範囲で復元します。</div>
+        </div>
+        <div>
+          <label>読み込み</label>
+          <button class="btn" id="btnPlanImport">読み込みして反映</button>
+          <div id="planImportMsg" class="mini" style="margin-top:8px;">${escHtml(planImportMsgText)}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="secCoordCatalog">
+      <h2>座標一覧（CSV）</h2>
+      <div class="grid grid-3">
+        <div>
+          <label>CSVファイル</label>
+          <input id="coordCsvFile" type="file" accept=".csv,text/csv,text/plain" />
+          <div class="mini">形式：名称,X座標,Y座標,Z標高（<b>X=北N</b>、<b>Y=東E</b>）。ヘッダ有/無、末尾カンマもOK。</div>
+        </div>
+        <div>
+          <label>検索（名称）</label>
+          <input id="coordSearch" type="text" value="${escHtml(uiState.coordSearch||"")}" placeholder="名称で検索…" />
+          <div class="mini">表示：${catalogShown.length}/${catalogFiltered.length}（全${catalogAll.length}）</div>
+        </div>
+        <div>
+          <label>操作</label>
+          <button class="btn" id="btnCoordLoad">CSVを読み込み</button>
+          <div style="height:8px;"></div>
+          <button class="btn btn-ghost" id="btnCoordClear">一覧をクリア</button>
+          <div class="mini" style="margin-top:6px;">最終読込：${escHtml(state.coordCatalog.lastFile||"")} ${escHtml(state.coordCatalog.lastLoadedAt||"")}</div>
+        </div>
+      </div>
+
+      <div style="overflow:auto; margin-top:10px; max-height:280px;">
+        <table>
+          <thead><tr><th>名称</th><th class="right">N(X)</th><th class="right">E(Y)</th><th class="right">Z</th><th>反映</th></tr></thead>
+          <tbody>
+            ${catalogShown.map((r)=>`
+              <tr>
+                <td class="mono">${escHtml(r.name)}</td>
+                <td class="right mono">${Number(r.N).toFixed(d)}</td>
+                <td class="right mono">${Number(r.E).toFixed(d)}</td>
+                <td class="right mono">${(r.Z==null||!Number.isFinite(+r.Z))?"":Number(r.Z).toFixed(3)}</td>
+                <td>
+                  <button class="btn btn-ghost" data-cat-bp="${r._i}">BP</button>
+                  <button class="btn btn-ghost" data-cat-ep="${r._i}">EP</button>
+                  <button class="btn btn-ghost" data-cat-ip="${r._i}">+IP</button>
+                </td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+      <div class="mini" style="margin-top:8px;">※Zは平面入力では使いません（将来、縦断の初期標高に流用できます）。</div>
+    </div>
+
     <div class="card" id="secPlan">
       <h2>平面線形：BP / EP（座標m）</h2>
       <div class="grid grid-2">
@@ -2371,11 +2747,11 @@ const render = () => {
 
       <div style="overflow:auto; margin-top:10px;">
         <table>
-          <thead><tr><th>IP名</th><th>N</th><th>E</th></tr></thead>
+          <thead><tr><th>IP</th><th>N</th><th>E</th></tr></thead>
           <tbody>
             ${state.ipPoints.map(p=>`
               <tr>
-                <td><input data-ip-name="${p.id}" value="${p.name}" /></td>
+                <td class="mono">${p.name}</td>
                 <td><input data-ip-n="${p.id}" type="text" inputmode="decimal" autocomplete="off" value="${p.N}" /></td>
                 <td><input data-ip-e="${p.id}" type="text" inputmode="decimal" autocomplete="off" value="${p.E}" /></td>
               </tr>`).join("")}
@@ -2522,6 +2898,126 @@ const render = () => {
   inOutputStep.onchange = commitOutputStep;
   inOutputStep.onblur = commitOutputStep;
 
+
+  /* Plan import bind */
+  (function(){
+    const fi = document.getElementById("planImportFile");
+    const btn = document.getElementById("btnPlanImport");
+    const msg = document.getElementById("planImportMsg");
+    if (!fi || !btn) return;
+    btn.onclick = async ()=>{
+      try{
+        const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+        if (!file){ if (msg) msg.textContent = "ファイルを選択してください。"; return; }
+
+        if (msg) msg.textContent = "読み込み中…";
+        const text = await readLocalFileText(file);
+        const name = String(file.name || "").toLowerCase();
+
+        if (name.endsWith(".xrf") || text.trim().startsWith("<?xml")){
+          const r = parseXrfRoadGM(text);
+          applyPlanImport(r, "xrf", `XRF読み込み：IP ${r.ips.length}点 / 曲線設定 ${r.curveSettings.length}件`);
+          return;
+        }
+
+        if (name.endsWith(".sim")){
+          const pts = parseSimaA01Points(text);
+          if (!pts.length) throw new Error("SIMAからA01座標点が見つかりませんでした");
+          const {bp, ep} = pickBpEpFromPoints(pts);
+          const ips = extractIpPointsFromSima(pts);
+          applyPlanImport({ bp:{N:bp.x,E:bp.y}, ep:{N:ep.x,E:ep.y}, ips }, "sim", `SIMA読み込み：IP ${ips.length}点`);
+          return;
+        }
+
+        throw new Error("拡張子が .sim / .xrf のファイルを選択してください");
+      }catch(e){
+        if (msg) msg.textContent = `読み込みエラー：${e && e.message ? e.message : e}`;
+      }
+    };
+  })();
+
+
+
+  /* Coord catalog bind */
+  (function(){
+    const inSearch = document.getElementById('coordSearch');
+    if (inSearch) {
+      inSearch.oninput = (e)=>{ uiState.coordSearch = e.target.value || ""; saveUI(); render(); };
+    }
+
+    const fi = document.getElementById('coordCsvFile');
+    const btnLoad = document.getElementById('btnCoordLoad');
+    const btnClear = document.getElementById('btnCoordClear');
+
+    if (btnLoad) {
+      btnLoad.onclick = async ()=>{
+        try{
+          const file = (fi && fi.files && fi.files[0]) ? fi.files[0] : null;
+          if (!file) { alert('CSVファイルを選択してください'); return; }
+          const txt = await readLocalFileText(file);
+          const items = parseCoordCsv(txt);
+          if (!items.length) { alert('有効な行が見つかりませんでした（名称,X,Y,Z）'); return; }
+          state.coordCatalog = state.coordCatalog || { items: [], lastFile: '', lastLoadedAt: '' };
+          state.coordCatalog.items = items;
+          state.coordCatalog.lastFile = file.name || '';
+          state.coordCatalog.lastLoadedAt = new Date().toLocaleString();
+          saveState();
+          if (fi) fi.value = '';
+          render();
+          alert(`座標一覧を読み込みました：${items.length}件`);
+        }catch(e){
+          alert('CSV読み込みに失敗: ' + (e && e.message ? e.message : e));
+        }
+      };
+    }
+
+    if (btnClear) {
+      btnClear.onclick = ()=>{
+        if (!confirm('座標一覧をクリアします。よろしい？')) return;
+        state.coordCatalog = state.coordCatalog || { items: [], lastFile: '', lastLoadedAt: '' };
+        state.coordCatalog.items = [];
+        state.coordCatalog.lastFile = '';
+        state.coordCatalog.lastLoadedAt = '';
+        saveState();
+        render();
+      };
+    }
+
+    const getItem = (i)=>{
+      const idx = parseInt(String(i), 10);
+      if (!Number.isFinite(idx)) return null;
+      const arr = state.coordCatalog && Array.isArray(state.coordCatalog.items) ? state.coordCatalog.items : [];
+      return (idx>=0 && idx<arr.length) ? arr[idx] : null;
+    };
+
+    viewPlan.querySelectorAll('[data-cat-bp]').forEach(btn=>{
+      btn.onclick = ()=>{
+        const it = getItem(btn.getAttribute('data-cat-bp'));
+        if (!it) return;
+        state.bp.N = it.N; state.bp.E = it.E;
+        saveState(); render();
+      };
+    });
+    viewPlan.querySelectorAll('[data-cat-ep]').forEach(btn=>{
+      btn.onclick = ()=>{
+        const it = getItem(btn.getAttribute('data-cat-ep'));
+        if (!it) return;
+        state.ep.N = it.N; state.ep.E = it.E;
+        saveState(); render();
+      };
+    });
+    viewPlan.querySelectorAll('[data-cat-ip]').forEach(btn=>{
+      btn.onclick = ()=>{
+        const it = getItem(btn.getAttribute('data-cat-ip'));
+        if (!it) return;
+        const newId = Math.max(0, ...state.ipPoints.map(p=>p.id||0)) + 1;
+        state.ipPoints.push({ id:newId, name:`IP${newId}`, N: it.N, E: it.E });
+        state.useIpCount = Math.min(state.ipPoints.length, state.useIpCount + 1);
+        renumberIpsNoGaps();
+        saveState(); render();
+      };
+    });
+  })();
   /* BP/EP bind */
   document.getElementById("bpN").value = state.bp.N;
   document.getElementById("bpE").value = state.bp.E;
@@ -2580,6 +3076,7 @@ in_epE.onblur = commit_epE;
   document.getElementById("addIP").onclick = ()=>{
     const newId = Math.max(0, ...state.ipPoints.map(p=>p.id)) + 1;
     state.ipPoints.push({ id:newId, name:`IP${newId}`, N:0, E:0 });
+    renumberIpsNoGaps();
     state.useIpCount = Math.min(state.ipPoints.length, state.useIpCount + 1);
     saveState(); render();
   };
@@ -2600,6 +3097,8 @@ in_epE.onblur = commit_epE;
     ];
     state.useIpCount=3;
     state.curveSettings=[{ id:1, ipName:"IP2", R:200, A1:100, A2:100, Ls:40, direction:"auto" }];
+
+    renumberIpsNoGaps();
     state.extraStations=[];
     state.nextExtraId=1;
 
@@ -2625,6 +3124,7 @@ in_epE.onblur = commit_epE;
     const names = new Set(state.ipPoints.map(p=>p.name));
     state.curveSettings = state.curveSettings.filter(c=>names.has(c.ipName));
     if (delName) state.curveSettings = state.curveSettings.filter(c=>c.ipName!==delName);
+    renumberIpsNoGaps();
     saveState(); render();
   };
 
