@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.7</span></title>
+  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.7.1</span></title>
 
   <!-- PWA -->
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_4");
+      navigator.serviceWorker.register("./sw.js?v=18_7_1");
     }
   </script>
 
@@ -146,7 +146,7 @@
 </div>
 
 <script>
-// --- diagnostics (v18.7) ---
+// --- diagnostics (v18.7.1) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
@@ -528,9 +528,9 @@ function parseSimaA01Points(text){
     const cols = ln.split(",").map(s=>s.trim());
     if (cols.length < 6) continue;
     const name = (cols[2]||"").replace(/\s+/g," ").trim();
-    const x = parseFloat(String(cols[3]||"").replace(/,/g,"."));
-    const y = parseFloat(String(cols[4]||"").replace(/,/g,"."));
-    const z = parseFloat(String(cols[5]||"").replace(/,/g,"."));
+    const x = parseNumLoose(cols[3]||"");
+    const y = parseNumLoose(cols[4]||"");
+    const z = parseNumLoose(cols[5]||"");
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     const no = parseInt(String(cols[1]||"").replace(/[^\d\-]/g,""),10);
     pts.push({ name, x, y, z: Number.isFinite(z)?z:0, no: Number.isFinite(no)?no:null });
@@ -609,8 +609,8 @@ function parseXrfRoadGM(xmlText){
     .filter(el => el.localName === "PI" && el.parentElement && el.parentElement.localName === "PIs")
     .map(el => ({
       name: el.getAttribute("Name") || "",
-      x: parseFloat(el.getAttribute("x")),
-      y: parseFloat(el.getAttribute("y")),
+      x: parseNumLoose(el.getAttribute("x")),
+      y: parseNumLoose(el.getAttribute("y")),
     }))
     .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
 
@@ -631,7 +631,7 @@ function parseXrfRoadGM(xmlText){
   let staPitch = null;
   const interval = all.find(el => el.localName === "Interval" && el.parentElement && el.parentElement.localName === "StationEquation");
   if (interval) {
-    const sub = parseFloat(interval.getAttribute("Sub"));
+    const sub = parseNumLoose(interval.getAttribute("Sub"));
     if (Number.isFinite(sub) && sub > 0) staPitch = sub;
   }
 
@@ -795,9 +795,9 @@ function parseCoordCsv(text){
     if (cols.length < 3) continue;
     const name = (cols[0]||"").replace(/^\uFEFF/,"").trim();
     if (!name) continue;
-    const x = parseFloat(String(cols[1]||"").replace(/,/g,'.')); // X=Northing
-    const y = parseFloat(String(cols[2]||"").replace(/,/g,'.')); // Y=Easting
-    const z = parseFloat(String((cols[3] ?? "")).replace(/,/g,'.'));
+    const x = parseNumLoose(cols[1]||""); // X=Northing
+    const y = parseNumLoose(cols[2]||""); // Y=Easting
+    const z = parseNumLoose((cols[3] ?? ""));
     if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
     items.push({ name, N:x, E:y, Z: Number.isFinite(z) ? z : null });
   }
@@ -860,6 +860,35 @@ const normNameAscii = (s, maxLen=32) => {
   return s;
 };
 
+
+// ---- number parsing (keep minus sign) ----
+// iOS/Excelで混ざりやすい「全角/Unicodeマイナス」「全角数字」「全角小数点」などを正規化
+const normNumStr = (v) => {
+  let s = String(v ?? "").trim();
+  if (!s) return "";
+  s = s.replace(/\s+/g, "");
+  // normalize various dashes/minus to ASCII '-'
+  s = s.replace(/[−－ー﹣‐‑‒–—―]/g, "-");
+  // fullwidth digits -> ascii
+  s = s.replace(/[０-９]/g, (ch)=>String.fromCharCode(ch.charCodeAt(0) - 0xFF10 + 0x30));
+  // fullwidth dot/comma variants
+  s = s.replace(/[．。]/g, ".").replace(/[，､]/g, ",");
+  // decimal comma support:
+  //  - if both '.' and ',' exist => treat ',' as thousands separator and remove it
+  //  - if only ',' exists => treat as decimal separator and convert to '.'
+  if (s.includes(".") && s.includes(",")) s = s.replace(/,/g, "");
+  else if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, ".");
+  return s;
+};
+
+const parseNumLoose = (v) => {
+  const s = normNumStr(v);
+  if (!s) return NaN;
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : NaN;
+};
+
+
 // Parse station input in 100m-major style (e.g., "STA2+12.651" => 212.651m)
 // Also accepts plain meters ("212.651") and "STA.-1-20" style.
 const parseSta100 = (token) => {
@@ -871,22 +900,22 @@ const parseSta100 = (token) => {
   // allow "2+12.651"
   if (s.includes("+")) {
     const [a,b] = s.split("+",2);
-    const k = parseFloat(a.trim());
-    const rem = parseFloat(b.trim());
+    const k = parseNumLoose(a);
+    const rem = parseNumLoose(b);
     if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("STA形式が不正です");
     return k*100 + rem;
   }
 
   // allow "-1-20" (meaning -100 - 20)
-  const m = s.match(/^(-?\d+(?:\.\d+)?)[-－](\d+(?:\.\d+)?)$/);
+  const m = s.match(/^(-?\d+(?:\.\d+)?)[-－−](\d+(?:\.\d+)?)$/);
   if (m) {
-    const k = parseFloat(m[1]);
-    const rem = parseFloat(m[2]);
+    const k = parseNumLoose(m[1]);
+    const rem = parseNumLoose(m[2]);
     if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("STA形式が不正です");
     return k*100 - rem;
   }
 
-  const mv = parseFloat(s);
+  const mv = parseNumLoose(s);
   if (!Number.isFinite(mv)) throw new Error("数値が不正です");
   return mv;
 };
@@ -933,7 +962,7 @@ const xmlEscape = (s) =>
     .replace(/'/g,"&apos;");
 
 
-// Cross segment helpers (v18.7)
+// Cross segment helpers (v18.7.1)
 // mode: 'pct' uses slopePct directly, 'ratio' uses 1:X (vertical 1 : horizontal X)
 const crossRowSlopePct = (r)=>{
   const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
@@ -1355,15 +1384,48 @@ const parseTokenToM = (token, pitch) => {
   s = s.replace(/[mMｍＭ]\s*$/, "").trim();
   if (s.includes("+")) {
     const [a, b] = s.split("+", 2);
-    const k = parseFloat(a.trim());
-    const rem = parseFloat(b.trim());
+    const k = parseNumLoose(a);
+    const rem = parseNumLoose(b);
     if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("測点の数値が不正");
     return k * pitch + rem;
   }
-  const mv = parseFloat(s);
+  const mv = parseNumLoose(s);
   if (!Number.isFinite(mv)) throw new Error("数値が不正");
   return mv;
 };
+
+
+// Parse STA token in pitch-based style: "2+0" => 2*pitch + 0 (pitch m)
+// Accepts optional "STA" prefix and "k-rem" (e.g., "-1-2.5") forms
+const parseStaPitch = (token, pitch) => {
+  pitch = Math.max(1, Math.floor(pitch || 1));
+  let s = String(token ?? "").trim();
+  if (!s) throw new Error("STAが空です");
+  s = s.replace(/[mMｍＭ]\s*$/, "").trim();
+  s = s.replace(/^STA\.?/i, "").trim();
+
+  if (s.includes("+")) {
+    const [a, b] = s.split("+", 2);
+    const k = parseNumLoose(a);
+    const rem = parseNumLoose(b);
+    if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("STA形式が不正です");
+    return k * pitch + rem;
+  }
+
+  // allow "k-rem" (rem is positive)
+  const mm = s.match(/^(-?\d+(?:\.\d+)?)[-－−](\d+(?:\.\d+)?)$/);
+  if (mm) {
+    const k = parseNumLoose(mm[1]);
+    const rem = parseNumLoose(mm[2]);
+    if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("STA形式が不正です");
+    return k * pitch - rem;
+  }
+
+  const mv = parseNumLoose(s);
+  if (!Number.isFinite(mv)) throw new Error("数値が不正です");
+  return mv;
+};
+
 
 const setOrNull = (v)=> {
   const t = String(v ?? "").trim();
@@ -4654,8 +4716,8 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
       <h2>指定点の計画標高（STA + 左右 + 幅）</h2>
       <div class="grid grid-3">
         <div>
-          <label>STA（例：STA2+12.651 / 2+12.651 / 212.651）</label>
-          <input id="qSta" type="text" inputmode="decimal" autocomplete="off" placeholder="STA2+12.651" />
+          <label>STA（k+rem：pitch基準。例：2+0 / STA2+0 / 10.000）</label>
+          <input id="qSta" type="text" inputmode="decimal" autocomplete="off" placeholder="2+0" />
         </div>
         <div>
           <label>方向</label>
@@ -4745,7 +4807,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
     const side = qSide?.value || "center";
     if (side === "center") { qWidthPill.textContent = "端部幅員：0.000 m"; return; }
     try {
-      const m = parseSta100(qSta?.value || "");
+      const m = parseStaPitch(qSta?.value || "", pitch);
       if (!Number.isFinite(m)) throw new Error("STA不正");
       const cr = evalCrossDzAtSta(m, side, 0);
       qWidthPill.textContent = `端部幅員：${Number(cr.width||0).toFixed(3)} m`;
@@ -4776,7 +4838,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
   if (btnQ) {
     btnQ.onclick = ()=> {
       try {
-        const mRaw = parseSta100(qSta?.value || "");
+        const mRaw = parseStaPitch(qSta?.value || "", pitch);
         let m = mRaw;
         const side = qSide?.value || "center";
         let off = Number(qOffset?.value || 0);
@@ -4787,7 +4849,6 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         if (m > totalLen) m = totalLen;
         if (side === "center") off = 0;
 
-        const staDisp100 = staName100(m, 3);
         const staDispPitch = metersToStaPitch(m, pitch, 3);
 
         const zc = state.profile.enabled ? evalProfileZ(profModelOut, m) : NaN;
@@ -4831,8 +4892,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         qOut.innerHTML = `
           <div class="grid grid-3">
             <div class="mini">
-              <b>STA</b>：${staDisp100}（${m.toFixed(3)}m）<br/>
-              <b>表示STA</b>：${staDispPitch}（pitch=${pitch}）<br/>
+              <b>STA</b>：${staDispPitch}（${m.toFixed(3)}m / pitch=${pitch}m）<br/>
               <b>方向</b>：${side==="right"?"右":side==="left"?"左":"中心"} / <b>幅</b>：${off.toFixed(3)}m
             </div>
             <div class="mini">
