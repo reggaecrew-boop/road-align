@@ -2980,9 +2980,9 @@ const render = () => {
       <h2>平面線形の読み込み（SIMA / XRF）</h2>
       <div class="grid grid-2">
         <div>
-          <label>ファイル（.sim / .xrf）</label>
-          <input id="planImportFile" type="file" accept=".sim,.xrf,application/xml,text/xml,text/plain" />
-          <div class="mini">SIMA(.sim)は点名からBP/IP/EPの座標を読み込みます（曲線設定は空）。XRF(.xrf)はBP/IP/EPと曲線設定を可能な範囲で復元します。</div>
+          <label>ファイル（.sim / .sima / .xrf）</label>
+          <input id="planImportFile" type="file" />
+          <div class="mini">SIMA(.sim / .sima)は点名からBP/IP/EPの座標を読み込みます（曲線設定は空）。XRF(.xrf)はBP/IP/EPと曲線設定を可能な範囲で復元します。</div>
         </div>
         <div>
           <label>読み込み</label>
@@ -3256,7 +3256,7 @@ const render = () => {
           return;
         }
 
-        if (name.endsWith(".sim")){
+        if ((name.endsWith(".sim") || name.endsWith(".sima"))){
           const pts = parseSimaA01Points(text);
           if (!pts.length) throw new Error("SIMAからA01座標点が見つかりませんでした");
           const {bp, ep} = pickBpEpFromPoints(pts);
@@ -3265,7 +3265,7 @@ const render = () => {
           return;
         }
 
-        throw new Error("拡張子が .sim / .xrf のファイルを選択してください");
+        throw new Error("拡張子が .sim / .sima / .xrf のファイルを選択してください");
       }catch(e){
         if (msg) msg.textContent = `読み込みエラー：${e && e.message ? e.message : e}`;
       }
@@ -4692,7 +4692,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
       <h2>平面線形 出力（SIMA / XRF）</h2>
       <div class="grid grid-3">
         <div class="mini">
-          <b>拡張子</b>：.sim（SIMA） / .xrf（RoadGM）<br/>
+          <b>拡張子</b>：.sim / .sima（SIMA） / .xrf（RoadGM）<br/>
           .sim は<b>ASCII限定</b>で出力（Shift-JIS環境でも壊れにくくするため）<br/>
           .xrf は UTF-8
         </div>
