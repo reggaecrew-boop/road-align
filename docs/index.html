@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.8.10</span></title>
+  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.7.1</span></title>
 
   <!-- PWA -->
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_8_10");
+      navigator.serviceWorker.register("./sw.js?v=18_7_1");
     }
   </script>
 
@@ -146,7 +146,7 @@
 </div>
 
 <script>
-// --- diagnostics (v18.8.10) ---
+// --- diagnostics (v18.7.1) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
@@ -543,296 +543,6 @@ function parseSimaA01Points(text){
   return pts;
 }
 
-function parseSimaRoutes(text){
-  const src = String(text||"");
-  const lines = src.split(/\r?\n/);
-  const routes = [];
-  for (let i=0;i<lines.length;i++){
-    const ln = (lines[i]||"").trim();
-    if (!ln.startsWith("F00")) continue;
-    const cols0 = ln.split(",").map(s=>s.trim());
-    const routeName = (cols0[3]||"").replace(/\s+/g," ").trim();
-    const body = [];
-    for (let j=i+1; j<lines.length; j++){
-      const ln2 = (lines[j]||"").trim();
-      if (ln2.startsWith("F99")) { i = j; break; }
-      if (ln2.startsWith("F00")) { i = j-1; break; }
-      body.push(ln2);
-    }
-    routes.push({ name: routeName, lines: body });
-  }
-  return routes;
-}
-
-// SIMA(.sim/.sima) から路線データ（主要線/中心線）の C01/C02 を拾って曲線設定まで復元（ベストエフォート）
-function parseSimaPlan(text){
-  const pts = parseSimaA01Points(text);
-  if (!pts.length) throw new Error("SIMAからA01座標点が見つかりませんでした");
-
-  // point map: name -> {N,E,Z}
-  const pmap = new Map();
-  for (const p of pts){
-    const nm = (p.name||"").trim().replace(/\s+/g," ");
-    if (!pmap.has(nm)) pmap.set(nm, { N: p.x, E: p.y, Z: p.z });
-  }
-
-  const routes = parseSimaRoutes(text);
-  const pickRoute = (re)=> routes.find(r=>re.test(r.name)) || null;
-
-  // IP線（PI列）を優先
-  const rIP = pickRoute(/IP\s*線/i) || pickRoute(/IP線/);
-  let piNames = [];
-  if (rIP){
-    for (const ln of rIP.lines){
-      if (!ln || !ln.startsWith("B01")) continue;
-      const cols = ln.split(",").map(s=>s.trim());
-      const nm = (cols[2]||"").replace(/\s+/g," ").trim();
-      if (nm) piNames.push(nm);
-    }
-  }
-
-  // fallback: A01から BP/IP/EP を拾う（曲線設定は保証しない）
-  if (piNames.length < 2){
-    const {bp, ep} = pickBpEpFromPoints(pts);
-    const ips = extractIpPointsFromSima(pts);
-    return { bp:{N:bp.x,E:bp.y}, ep:{N:ep.x,E:ep.y}, ips, curveSettings:[], staPitch:null };
-  }
-
-  const pis = piNames.map(nm=>{
-    const p = pmap.get(nm);
-    return p ? ({ name: nm, N: p.N, E: p.E }) : null;
-  }).filter(Boolean);
-
-  if (pis.length < 2) throw new Error("SIMAのIP線からBP/EPが取得できませんでした（座標点が不足）");
-
-  const bp = { name: "BP", N: pis[0].N, E: pis[0].E, srcName: pis[0].name };
-  const ep = { name: "EP", N: pis[pis.length-1].N, E: pis[pis.length-1].E, srcName: pis[pis.length-1].name };
-  const ips = pis.slice(1, -1).map((p,i)=>({ id: i+1, name: `IP${i+1}`, N: p.N, E: p.E, srcName: p.name }));
-
-  // main route (主要線/中心線) を解析して C01/C02 をPIに紐付け
-  // main route: prefer the route that actually contains curve codes (C01/C02). 
-// Many SIMA files have multiple routes (IP線/主要線/中心線 etc). We pick the most "curve-rich" one.
-const scoreRoute = (r)=>{
-  if (!r || !Array.isArray(r.lines)) return -1;
-  const name = String(r.name||"");
-  if (/IP\s*線/i.test(name) || /IP線/.test(name)) return -1;
-  let c01=0, c02=0;
-  for (const ln of r.lines){
-    const s = String(ln||"").trim();
-    if (s.startsWith("C01")) c01++;
-    else if (s.startsWith("C02")) c02++;
-  }
-  const bonus = (/主要\s*線/i.test(name) || /主要線/.test(name) || /中心\s*線/i.test(name) || /中心線/.test(name)) ? 5 : 0;
-  return (c01*2 + c02*2) + bonus;
-};
-let rMain = null;
-let bestScore = -1;
-for (const r of routes){
-  const sc = scoreRoute(r);
-  if (sc > bestScore){
-    bestScore = sc;
-    rMain = r;
-  }
-}
-  const byRef = new Map();
-  let staPitch = null;
-
-  // helpers (standard XY: x=E, y=N)
-  const orient2 = (a,b,c)=> (b.x-a.x)*(c.y-a.y) - (b.y-a.y)*(c.x-a.x);
-  const circleCenters = (S,E,r)=>{
-    const dx = E.x - S.x, dy = E.y - S.y;
-    const d = Math.hypot(dx, dy);
-    if (!Number.isFinite(d) || d === 0 || d > 2*r) return [];
-    const mx = (S.x + E.x) / 2, my = (S.y + E.y) / 2;
-    const h = Math.sqrt(Math.max(r*r - (d/2)*(d/2), 0));
-    const ux = -dy / d, uy = dx / d; // perp unit
-    return [{ x: mx + ux*h, y: my + uy*h }, { x: mx - ux*h, y: my - uy*h }];
-  };
-  const arcLenFrom3Pts = (sN,sE, mN,mE, eN,eE, r)=>{
-    const S = { x: sE, y: sN }, M = { x: mE, y: mN }, E = { x: eE, y: eN };
-    const dir = orient2(S, M, E) >= 0 ? "ccw" : "cw";
-    const centers = circleCenters(S, E, r);
-    // chord fallback
-    if (!centers.length){
-      const chord = Math.hypot(E.x-S.x, E.y-S.y);
-      const theta = 2 * Math.asin(Math.min(1, chord/(2*r)));
-      return { len: r*theta, dir };
-    }
-    let best = centers[0], bestErr = Infinity;
-    for (const c of centers){
-      const err = Math.abs(Math.hypot(M.x-c.x, M.y-c.y) - r);
-      if (err < bestErr){ bestErr = err; best = c; }
-    }
-    const v1 = { x: S.x-best.x, y: S.y-best.y };
-    const v2 = { x: E.x-best.x, y: E.y-best.y };
-    const cross = v1.x*v2.y - v1.y*v2.x;
-    const dot = v1.x*v2.x + v1.y*v2.y;
-    let ang = Math.atan2(cross, dot); // [-pi,pi]
-    if (dir === "ccw") { if (ang < 0) ang += 2*Math.PI; }
-    else { if (ang > 0) ang -= 2*Math.PI; ang = -ang; }
-    return { len: Math.abs(ang) * r, dir };
-  };
-
-  const addRec = (ref)=>{
-    const rec = byRef.get(ref) || { curves: [], clothoids: [] };
-    byRef.set(ref, rec);
-    return rec;
-  };
-  const isSpPoint = (nm)=>{
-    const n = String(nm||"").toUpperCase().replace(/\s+/g,"");
-    return n.startsWith("SP.") || n.startsWith("SP");
-  };
-
-  if (rMain){
-    const f03 = rMain.lines.find(l=>String(l||"").trim().startsWith("F03"));
-    if (f03){
-      const cols = f03.split(",").map(s=>s.trim());
-      const sub = parseNumLoose(cols[3]);
-      if (Number.isFinite(sub) && sub > 0) staPitch = sub;
-    }
-
-    let cur = null;
-    let pendingArc = null;
-
-    for (let i=0; i<rMain.lines.length; i++){
-      const ln = String(rMain.lines[i]||"").trim();
-      if (!ln) continue;
-      const cols = ln.split(",").map(s=>s.trim());
-      const code = cols[0];
-
-      if (code === "B01"){
-        cur = (cols[2]||"").replace(/\s+/g," ").trim();
-        continue;
-      }
-
-      if (code === "C02"){
-        const A = parseNumLoose(cols[1]);
-        const R1 = parseNumLoose(cols[2]);
-        const R2 = parseNumLoose(cols[3]);
-
-        let j = i+1;
-        while (j < rMain.lines.length && !String(rMain.lines[j]||"").trim()) j++;
-        let piName = "";
-        if (j < rMain.lines.length && String(rMain.lines[j]||"").trim().startsWith("C04")){
-          const c = String(rMain.lines[j]).split(",").map(s=>s.trim());
-          piName = (c[2]||"").replace(/\s+/g," ").trim();
-          j++;
-        }
-        while (j < rMain.lines.length && !String(rMain.lines[j]||"").trim()) j++;
-        let endName = "";
-        if (j < rMain.lines.length && String(rMain.lines[j]||"").trim().startsWith("B01")){
-          const c = String(rMain.lines[j]).split(",").map(s=>s.trim());
-          endName = (c[2]||"").replace(/\s+/g," ").trim();
-        }
-
-        if (cur && endName && piName && Number.isFinite(A) && A >= 0){
-          const ps = pmap.get(cur), pp = pmap.get(piName), pe = pmap.get(endName);
-          let dir = "ccw";
-          if (ps && pp && pe){
-            const S = { x: ps.E, y: ps.N }, P = { x: pp.E, y: pp.N }, E = { x: pe.E, y: pe.N };
-            dir = orient2(S, P, E) >= 0 ? "ccw" : "cw";
-          }
-          const inv = (R)=> (Number.isFinite(R) && Math.abs(R) > 1e-12) ? 1/Math.abs(R) : 0;
-          const L = Math.abs(A*A*(inv(R2) - inv(R1)));
-          addRec(piName).clothoids.push({ A, dir, len: Number.isFinite(L) ? L : null });
-          cur = endName;
-        }
-
-        pendingArc = null;
-        i = j;
-        continue;
-      }
-
-      if (code === "C01"){
-        let R = parseNumLoose(cols[2]);
-        if (!Number.isFinite(R)) R = parseNumLoose(cols[1]);
-        R = Math.abs(R);
-
-        let j = i+1;
-        while (j < rMain.lines.length && !String(rMain.lines[j]||"").trim()) j++;
-        let piName = "";
-        if (j < rMain.lines.length && String(rMain.lines[j]||"").trim().startsWith("C04")){
-          const c = String(rMain.lines[j]).split(",").map(s=>s.trim());
-          piName = (c[2]||"").replace(/\s+/g," ").trim();
-          j++;
-        }
-        while (j < rMain.lines.length && !String(rMain.lines[j]||"").trim()) j++;
-        let pName = "";
-        if (j < rMain.lines.length && String(rMain.lines[j]||"").trim().startsWith("B01")){
-          const c = String(rMain.lines[j]).split(",").map(s=>s.trim());
-          pName = (c[2]||"").replace(/\s+/g," ").trim();
-        }
-
-        if (!cur || !pName || !piName || !Number.isFinite(R) || R <= 0){
-          i = j;
-          continue;
-        }
-
-        if (!pendingArc){
-          pendingArc = { start: cur, mid: null, R, piName };
-          if (isSpPoint(pName)){
-            pendingArc.mid = pName;
-          } else {
-            // no SP: chord minor arc (direction unknown -> ccw as default)
-            const ps = pmap.get(cur), pe = pmap.get(pName);
-            if (ps && pe){
-              const S = { x: ps.E, y: ps.N }, E = { x: pe.E, y: pe.N };
-              const chord = Math.hypot(E.x-S.x, E.y-S.y);
-              const theta = 2 * Math.asin(Math.min(1, chord/(2*R)));
-              addRec(piName).curves.push({ radius: R, dir: "ccw", len: R*theta });
-            }
-            cur = pName;
-            pendingArc = null;
-          }
-        } else {
-          // complete arc (start-mid-end)
-          const startName = pendingArc.start;
-          const midName = pendingArc.mid;
-          const endName = pName;
-
-          const ps = pmap.get(startName), pm = midName ? pmap.get(midName) : null, pe = pmap.get(endName);
-          if (ps && pm && pe){
-            const res = arcLenFrom3Pts(ps.N, ps.E, pm.N, pm.E, pe.N, pe.E, pendingArc.R);
-            addRec(piName).curves.push({ radius: pendingArc.R, dir: res.dir, len: res.len });
-          } else if (ps && pe){
-            const S = { x: ps.E, y: ps.N }, E = { x: pe.E, y: pe.N };
-            const chord = Math.hypot(E.x-S.x, E.y-S.y);
-            const theta = 2 * Math.asin(Math.min(1, chord/(2*pendingArc.R)));
-            addRec(piName).curves.push({ radius: pendingArc.R, dir: "ccw", len: pendingArc.R*theta });
-          }
-
-          cur = endName;
-          pendingArc = null;
-        }
-
-        i = j;
-        continue;
-      }
-    }
-  }
-
-  // curve settings (same policy as XRF)
-  const curveSettings = [];
-  for (const ip of ips){
-    const rec = byRef.get(ip.srcName);
-    if (!rec || !rec.curves.length) continue;
-
-    const c = rec.curves.slice().sort((a,b)=>(b.len||0)-(a.len||0))[0];
-    const dir = c.dir === "ccw" ? "left" : c.dir === "cw" ? "right" : "auto";
-
-    let A1 = 0, A2 = 0;
-    if (rec.clothoids && rec.clothoids.length){
-      const cs = rec.clothoids.slice().sort((a,b)=>(b.len||0)-(a.len||0));
-      A1 = cs[0].A || 0;
-      A2 = (cs[1]?.A ?? A1) || 0;
-    }
-
-    curveSettings.push({ id: curveSettings.length+1, ipName: ip.name, R: c.radius, A1, A2, direction: dir, ds: state.dsSpiral || 0.5 });
-  }
-
-  return { bp, ep, ips, curveSettings, staPitch };
-}
-
 function pickBpEpFromPoints(pts){
   const normName = (s)=>String(s||"").toUpperCase().replace(/\s+/g,"").replace(/_/g,"");
   let bp = null, ep = null;
@@ -985,15 +695,20 @@ function applyPlanImport(result, mode, msgText){
   state.useIpCount = state.ipPoints.length;
 
 
-  // 曲線設定とピッチ（SIMA/XRFどちらも、取得できた分だけ反映）
-  if (Array.isArray(result.curveSettings) && result.curveSettings.length){
-    state.curveSettings = result.curveSettings;
+  if (mode === "xrf") {
+    if (Array.isArray(result.curveSettings) && result.curveSettings.length){
+      state.curveSettings = result.curveSettings;
+    } else {
+      // keep existing but align ipName if possible
+      state.curveSettings = [];
+    }
+    if (Number.isFinite(result.staPitch) && result.staPitch>0){
+      state.staPitch = Math.round(result.staPitch);
+      state.outputStep = Math.round(result.staPitch);
+    }
   } else {
+    // SIMA: we can import geometry points, but curve settings are not guaranteed
     state.curveSettings = [];
-  }
-  if (Number.isFinite(result.staPitch) && result.staPitch>0){
-    state.staPitch = Math.round(result.staPitch);
-    state.outputStep = Math.round(result.staPitch);
   }
 
   // enforce IP1..IPn naming (no gaps)
@@ -1247,7 +962,7 @@ const xmlEscape = (s) =>
     .replace(/'/g,"&apos;");
 
 
-// Cross segment helpers (v18.8.10)
+// Cross segment helpers (v18.7.1)
 // mode: 'pct' uses slopePct directly, 'ratio' uses 1:X (vertical 1 : horizontal X)
 const crossRowSlopePct = (r)=>{
   const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
@@ -1845,22 +1560,7 @@ const ensureCrossState = ()=>{
     obj.segs = obj.segs.map((r, idx)=>({
       id: (r && Number.isFinite(r.id)) ? r.id : (idx + 1),
       end: Number(r && r.end),
-      // mode: 'pct' or 'ratio'
-      mode: (r && (r.mode === 'pct' || r.mode === 'ratio')) ? r.mode : 'pct',
-      // slope (%)
       slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
-      // raw input text for % (keep what user typed)
-      slopeText: (r && typeof r.slopeText === 'string') ? r.slopeText : undefined,
-      // 1:X inputs (kept even in pct mode for later switching)
-      ratioX: Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20,
-      ratioDir: (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r && r.slopePct)||0) >= 0 ? 'up' : 'down'),
-      // waribun raw text (keep after conversion)
-      wb: (r && typeof r.wb === 'string') ? r.wb : '',
-      // step (signed) and direction (keep direction even when stepDz==0)
-      stepDz: Number.isFinite(Number(r && r.stepDz)) ? Number(r.stepDz) : 0,
-      stepDir: (r && (r.stepDir === 'up' || r.stepDir === 'down')) ? r.stepDir : (((Number(r && r.stepDz)||0) < 0) ? 'down' : 'up'),
-      // raw input text for step abs (keep what user typed)
-      stepAbsText: (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : undefined,
     }));
     if (!Number.isFinite(obj.nextSegId)) {
       const mx = Math.max(0, ...obj.segs.map(r=>r.id||0));
@@ -1890,11 +1590,7 @@ const cloneCrossSide = (src)=>{
     mode: (r && typeof r.mode === 'string') ? r.mode : 'pct',
     slopePct: Number(r?.slopePct) || 0,
     ratioX: Number.isFinite(Number(r?.ratioX)) ? Number(r.ratioX) : 20,
-    slopeText: (typeof r?.slopeText==='string') ? r.slopeText : undefined,
     ratioDir: (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r?.slopePct)||0) >= 0 ? 'up' : 'down'),
-    wb: (typeof r?.wb==='string') ? r.wb : '',
-    stepDir: (r && (r.stepDir==='up' || r.stepDir==='down')) ? r.stepDir : (((Number(r?.stepDz)||0)<0)?'down':'up'),
-    stepAbsText: (typeof r?.stepAbsText==='string') ? r.stepAbsText : undefined,
     stepDz: Number(r?.stepDz) || 0,
   })).filter(r => Number.isFinite(r.end) && r.end > 0);
   const mx = Math.max(0, ...segs.map(r=>r.id||0));
@@ -2298,7 +1994,7 @@ const bindCrossSlopeUI = (rootEl)=>{
       addBtn.onclick = ()=>{
         const store = getCrossStore(scope, side, staKey);
         const last = Math.max(0, ...(store.segs||[]).map(r=>Number(r.end)||0));
-        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), mode: 'pct', slopePct: 0.0, slopeText: '0.000', ratioX: 20, ratioDir: 'down', wb:'', stepDz: 0, stepDir:'up', stepAbsText:'0.000' });
+        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', stepDz: 0 });
         sortCrossSegs(scope, side, staKey);
         saveState();
         render();
@@ -2365,43 +2061,26 @@ const bindCrossSlopeUI = (rootEl)=>{
       selEl.onblur = commit;
     });
 
-    // % slope input (when mode=pct) — keep typed text, update numeric on commit
-rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-slope]`).forEach(inp=>{
-  const id = parseInt(inp.getAttribute('data-xs-id'),10);
-
-  const setTextOnly = (v)=>{
-    const store = getCrossStore(scope, side, staKey);
-    const r = (store.segs||[]).find(x=>x.id===id);
-    if (!r) return;
-    r.slopeText = String(v ?? "");
-    // 文字列だけ保持（この段階ではrenderしない＝入力を消さない）
-    saveState();
-  };
-
-  const commit = (e)=>{
-    const store = getCrossStore(scope, side, staKey);
-    const r = (store.segs||[]).find(x=>x.id===id);
-    if (!r) return;
-    const t = String(e.target.value ?? "");
-    r.slopeText = t;
-
-    const tt = t.trim();
-    if (tt === "") { saveState(); render(); return; }
-
-    const n = parseFloat(tt.replace(/,/g,"."));
-    if (!Number.isFinite(n)) { saveState(); render(); return; }
-
-    r.mode = 'pct';
-    r.slopePct = n;
-    // 入力文字列はそのまま残す
-    saveState();
-    render();
-  };
-
-  inp.oninput  = (e)=> setTextOnly(e.target.value);
-  inp.onchange = commit;
-  inp.onblur   = commit;
-});
+    // % slope input (when mode=pct)
+    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-slope]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const t = String(e.target.value ?? "").trim();
+        if (t === "") { render(); return; }
+        const n = parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(n)) { render(); return; }
+        r.mode = 'pct';
+        r.slopePct = n;
+        r.wb = "";
+        saveState();
+        render();
+      };
+      inp.onchange = commit;
+      inp.onblur = commit;
+    });
 
     
 
@@ -2471,66 +2150,38 @@ rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="
       selEl.onblur = commit;
     });
 
-    // step abs input — keep typed text, update numeric on commit
-rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepabs]`).forEach(inp=>{
-  const id = parseInt(inp.getAttribute('data-xs-id'),10);
-
-  const setTextOnly = (v)=>{
-    const store = getCrossStore(scope, side, staKey);
-    const r = (store.segs||[]).find(x=>x.id===id);
-    if (!r) return;
-    r.stepAbsText = String(v ?? "");
-    saveState();
-  };
-
-  const commit = (e)=>{
-    const store = getCrossStore(scope, side, staKey);
-    const r = (store.segs||[]).find(x=>x.id===id);
-    if (!r) return;
-
-    const t = String(e.target.value ?? "");
-    r.stepAbsText = t;
-
-    const tt = t.trim();
-    const abs = (tt === "") ? 0 : parseFloat(tt.replace(/,/g,"."));
-    if (!Number.isFinite(abs) || abs < 0) { saveState(); render(); return; }
-
-    const dir = (r.stepDir === 'down') ? -1 : 1;
-    r.stepDz = dir * abs;
-    // stepDirは保持
-    saveState();
-    render();
-  };
-
-  inp.oninput  = (e)=> setTextOnly(e.target.value);
-  inp.onchange = commit;
-  inp.onblur   = commit;
-});
+    // step abs input
+    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepabs]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const t = String(e.target.value ?? "").trim();
+        const abs = (t === "") ? 0 : parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(abs) || abs < 0) { render(); return; }
+        const dir = (r.stepDz != null && Number(r.stepDz) < 0) ? -1 : 1;
+        r.stepDz = dir * abs;
+        saveState();
+        render();
+      };
+      inp.onchange = commit;
+      inp.onblur = commit;
+    });
 
     // step direction
-rootEl.querySelectorAll(`select[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepdir]`).forEach(selEl=>{
-  const id = parseInt(selEl.getAttribute('data-xs-id'),10);
-  const commit = (e)=>{
-    const store = getCrossStore(scope, side, staKey);
-    const r = (store.segs||[]).find(x=>x.id===id);
-    if (!r) return;
-    const v = String(e.target.value||'up');
-    r.stepDir = (v === 'down') ? 'down' : 'up';
-
-    // absは入力文字列を優先（なければ既存stepDzから）
-    let abs = Math.abs(Number(r.stepDz)||0);
-    const tt = String(r.stepAbsText ?? "").trim();
-    const n = tt === "" ? NaN : parseFloat(tt.replace(/,/g,"."));
-    if (Number.isFinite(n) && n >= 0) abs = n;
-
-    r.stepDz = (r.stepDir === 'down') ? -abs : abs;
-    saveState();
-    render();
-  };
-  selEl.onchange = commit;
-  selEl.onblur = commit;
-});
-
+    rootEl.querySelectorAll(`select[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepdir]`).forEach(selEl=>{
+      const id = parseInt(selEl.getAttribute('data-xs-id'),10);
+      const commit = (e)=>{
+        const store = getCrossStore(scope, side, staKey);
+        const r = (store.segs||[]).find(x=>x.id===id);
+        if (!r) return;
+        const v = String(e.target.value||'up');
+        const abs = Math.abs(Number(r.stepDz)||0);
+        r.stepDz = (v === 'down') ? -abs : abs;
+        saveState();
+        render();
+      };
       selEl.onchange = commit;
       selEl.onblur = commit;
     });
@@ -3331,7 +2982,7 @@ const render = () => {
         <div>
           <label>ファイル（.sim / .sima / .xrf）</label>
           <input id="planImportFile" type="file" />
-          <div class="mini">SIMA(.sim / .sima)は「路線データ（主要線/中心線）」のC01/C02を解析し、曲線（円弧/クロソイド）を可能な範囲で復元します。XRF(.xrf)も同様に復元します。</div>
+          <div class="mini">SIMA(.sim / .sima)は点名からBP/IP/EPの座標を読み込みます（曲線設定は空）。XRF(.xrf)はBP/IP/EPと曲線設定を可能な範囲で復元します。</div>
         </div>
         <div>
           <label>読み込み</label>
@@ -3606,8 +3257,11 @@ const render = () => {
         }
 
         if ((name.endsWith(".sim") || name.endsWith(".sima"))){
-          const r = parseSimaPlan(text);
-          applyPlanImport(r, "sim", `SIMA読み込み：IP ${r.ips.length}点 / 曲線設定 ${r.curveSettings.length}件`);
+          const pts = parseSimaA01Points(text);
+          if (!pts.length) throw new Error("SIMAからA01座標点が見つかりませんでした");
+          const {bp, ep} = pickBpEpFromPoints(pts);
+          const ips = extractIpPointsFromSima(pts);
+          applyPlanImport({ bp:{N:bp.x,E:bp.y}, ep:{N:ep.x,E:ep.y}, ips }, "sim", `SIMA読み込み：IP ${ips.length}点`);
           return;
         }
 
@@ -4382,7 +4036,7 @@ bindExtraUI("profile", viewProfile, pitch);
       const slopePct = crossRowSlopePct(r);
       const stepDz = crossRowStepDz(r);
       const stepAbs = Math.abs(Number(stepDz)||0);
-      const stepDir = (Math.abs(Number(stepDz)||0) > 0) ? ((Number(stepDz) < 0) ? 'down' : 'up') : ((r && (r.stepDir === 'down' || r.stepDir === 'up')) ? r.stepDir : 'up');
+      const stepDir = (Number(stepDz)||0) >= 0 ? 'up' : 'down';
       const wbText = (r && typeof r.wb === 'string') ? r.wb : '';
       const wbInfo = parseWaribun(wbText);
       let wbPreviewPct = null;
@@ -4409,7 +4063,7 @@ bindExtraUI("profile", viewProfile, pitch);
           </td>
           <td>
             ${mode==='pct' ? `
-              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-slope type="text" inputmode="decimal" value="${xmlEscape(((r && typeof r.slopeText==='string')?r.slopeText:slopePctRaw.toFixed(3)))}" />
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-slope type="number" step="0.001" value="${slopePctRaw.toFixed(3)}" />
               <div class="mini">（+上がり / -下がり）</div>
               <div class="row" style="gap:6px; align-items:center; margin-top:6px;">
                 <span class="mini">割分</span>
@@ -4430,7 +4084,7 @@ bindExtraUI("profile", viewProfile, pitch);
           </td>
           <td>
             <div class="row" style="gap:6px; align-items:center;">
-              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepabs type="text" inputmode="decimal" value="${xmlEscape(((r && typeof r.stepAbsText==='string')?r.stepAbsText:stepAbs.toFixed(3)))}" style="width:110px;" />
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepabs type="number" step="0.001" min="0" value="${stepAbs.toFixed(3)}" style="width:110px;" />
               <select data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepdir>
                 <option value="up" ${stepDir==='up'?'selected':''}>上</option>
                 <option value="down" ${stepDir==='down'?'selected':''}>下</option>
