@@ -1,49 +1,42 @@
-const CACHE_NAME = 'road-align-v18-8-2';
-const ASSETS = ["./", "./index.html", "./manifest.json", "./sw.js"];
+// sw.js (v18.8.4)
+const CACHE_NAME = "road-align-cache-v18.8.4";
+const CORE_ASSETS = [
+  "./",
+  "./index.html",
+  "./manifest.json"
+];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((c) => c.addAll(ASSETS)));
-  self.skipWaiting();
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.addAll(CORE_ASSETS);
+    self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    (async () => {
-      const keys = await caches.keys();
-      await Promise.all(keys.map((k) => (k !== CACHE_NAME ? caches.delete(k) : null)));
-      await self.clients.claim();
-    })()
-  );
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.map((k) => {
+      if (k !== CACHE_NAME) return caches.delete(k);
+    }));
+    self.clients.claim();
+  })());
 });
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;
-  const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return;
-
-  if (req.mode === "navigate") {
-    event.respondWith(
-      (async () => {
-        try {
-          return await fetch(req);
-        } catch {
-          return (await caches.match("./")) || (await caches.match("./index.html"));
-        }
-      })()
-    );
-    return;
-  }
-
-  event.respondWith(
-    (async () => {
-      try {
-        const fresh = await fetch(req);
-        const cache = await caches.open(CACHE_NAME);
-        cache.put(req, fresh.clone());
-        return fresh;
-      } catch {
-        return caches.match(req);
-      }
-    })()
-  );
+  if (req.method !== "GET") return;
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE_NAME);
+    const cached = await cache.match(req, { ignoreSearch: true });
+    if (cached) return cached;
+    try {
+      const res = await fetch(req);
+      if (res && res.ok) cache.put(req, res.clone());
+      return res;
+    } catch (e) {
+      return cached || Response.error();
+    }
+  })());
 });
