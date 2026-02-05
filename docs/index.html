@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_7_1");
+      navigator.serviceWorker.register("./sw.js?v=18_8_2");
     }
   </script>
 
@@ -146,7 +146,7 @@
 </div>
 
 <script>
-// --- diagnostics (v18.7.1) ---
+// --- diagnostics (v18.8.0) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
@@ -208,6 +208,16 @@ let state = {
   outputStep: 20,
   dsSpiral: 0.5,
   clothoidMode: "A",
+  // 平面入力方式: ip / elem（要素法）
+  planInputMode: "ip",
+  // 要素法: 開始方位角AZ(度; 0=北, 90=東)
+  planStartAz: 0,
+  // 要素法: 要素列（BPから順）
+  planElements: [
+    // 例）{ id:1, endName:"TS", type:"spiral_in", dir:"left", R:200, A:100, Ls:null, dDeg:null, Lc:null, L: null, ds:0.5 }
+  ],
+  nextPlanElemId: 1,
+
   // 座標一覧（CSV取り込み）
   coordCatalog: { items: [], lastFile: "", lastLoadedAt: "" },
 
@@ -333,6 +343,33 @@ function normalizeState(s) {
       s.nextExtraId = { plan: 1, profile: 1, cross: 1, output: 1 };
     }
     s.nextExtraId = Object.assign({ plan: 1, profile: 1, cross: 1, output: 1 }, s.nextExtraId);
+  }
+
+
+  // --- plan (input mode / elements) ---
+  s.planInputMode = (s.planInputMode === 'elem' || s.planInputMode === 'ip') ? s.planInputMode : 'ip';
+  s.planStartAz = Number.isFinite(Number(s.planStartAz)) ? Number(s.planStartAz) : 0;
+  if (!Array.isArray(s.planElements)) s.planElements = [];
+  s.planElements = s.planElements.map((r, idx)=>{
+    r = (r && typeof r === 'object' && !Array.isArray(r)) ? r : {};
+    const id = Number.isFinite(Number(r.id)) ? Number(r.id) : (idx + 1);
+    const endName = (typeof r.endName === 'string') ? r.endName : '';
+    const type = (r.type === 'straight' || r.type === 'arc' || r.type === 'spiral_in' || r.type === 'spiral_out') ? r.type : 'straight';
+    const dir = (r.dir === 'left' || r.dir === 'right') ? r.dir : 'left';
+    const R  = (r.R == null || r.R === '') ? null : Number(r.R);
+    const A  = (r.A == null || r.A === '') ? null : Number(r.A);
+    const Ls = (r.Ls == null || r.Ls === '') ? null : Number(r.Ls);
+    const dDeg = (r.dDeg == null || r.dDeg === '') ? null : Number(r.dDeg);
+    const Lc = (r.Lc == null || r.Lc === '') ? null : Number(r.Lc);
+    const L  = (r.L == null || r.L === '') ? null : Number(r.L);
+    const ds = (r.ds == null || r.ds === '') ? null : Number(r.ds);
+    return { id, endName, type, dir, R, A, Ls, dDeg, Lc, L, ds };
+  });
+  s.nextPlanElemId = Number.isFinite(Number(s.nextPlanElemId)) ? Number(s.nextPlanElemId) : 1;
+  // nextPlanElemId: recompute if invalid
+  if (!Number.isFinite(s.nextPlanElemId) || s.nextPlanElemId <= 0) {
+    const mx = Math.max(0, ...(s.planElements||[]).map(e=>e.id||0));
+    s.nextPlanElemId = mx + 1;
   }
 
   // --- profile ---
@@ -510,7 +547,7 @@ async function readLocalFileText(file){
     try { return new TextDecoder(label).decode(u8); } catch(e){ return null; }
   };
 
-  if (ext === "sim") {
+  if (ext === "sim" || ext === "sima") {
     return tryDec("shift_jis") || tryDec("shift-jis") || tryDec("sjis") || tryDec("utf-8") || new TextDecoder().decode(u8);
   }
   // xrf is UTF-8 xml in practice
@@ -595,6 +632,189 @@ function extractIpPointsFromSima(pts){
   // ensure ids sequential
   return uniq.map((p,i)=>({ id: i+1, name: `IP${i+1}`, N: p.N, E: p.E, srcName: p.name }));
 }
+
+
+/* ---- SIMA: 曲線設定（C01/C02）を可能な範囲で復元 ---- */
+function simaNormKey(s){
+  return String(s||"").toUpperCase().replace(/\s+/g,"").replace(/[．。]/g,".").replace(/[−－ー﹣‐-‒–—―]/g,"-");
+}
+function simaIpNum(name){
+  const m = String(name||"").match(/IP\.?\s*([0-9]+)/i);
+  return m ? parseInt(m[1],10) : null;
+}
+function parseSimaStaPitch(text){
+  const lines = String(text||"").split(/\r?\n/);
+  for (const ln0 of lines){
+    const ln = ln0.trim();
+    if (!ln.startsWith("F03")) continue;
+    const cols = ln.split(",").map(s=>s.trim());
+    // F03, startSta, major, minor,
+    const minor = parseNumLoose(cols[3]||"");
+    if (Number.isFinite(minor) && minor > 0) return minor;
+  }
+  return null;
+}
+function parseSimaCElements(text){
+  const out = [];
+  const lines = String(text||"").split(/\r?\n/);
+  let pending = null;
+  for (const ln0 of lines){
+    const ln = ln0.trim();
+    if (!ln) continue;
+    if (ln.startsWith("C01")){
+      const cols = ln.split(",").map(s=>s.trim());
+      const R = parseNumLoose(cols[2]||"");
+      pending = { type:"C01", R };
+      continue;
+    }
+    if (ln.startsWith("C02")){
+      const cols = ln.split(",").map(s=>s.trim());
+      // NOTE: Many SIMA datasets store C02 1st param as Clothoid parameter A (not Ls).
+      const A  = parseNumLoose(cols[1]||"");
+      const R1 = parseNumLoose(cols[2]||"");
+      const R2 = parseNumLoose(cols[3]||"");
+      pending = { type:"C02", A, R1, R2 };
+      continue;
+    }
+    if (ln.startsWith("C04") && pending){
+      const cols = ln.split(",").map(s=>s.trim());
+      const ref = (cols[2]||"").replace(/\s+/g," ").trim();
+      const no  = parseInt(String(cols[1]||"").replace(/[^\d\-]/g,""),10);
+      out.push(Object.assign({ ipRef: ref, ipNo: Number.isFinite(no)?no:null }, pending));
+      pending = null;
+      continue;
+    }
+  }
+  return out;
+}
+
+function buildCurveSettingsFromSima(text, ipsWithSrc, dsDefault){
+  const ds = Number.isFinite(Number(dsDefault)) && Number(dsDefault)>0 ? Number(dsDefault) : 0.5;
+
+  // map IP ref -> imported IP name
+  const ipNormToImported = new Map();
+  for (const ip of (ipsWithSrc||[])){
+    const src = ip.srcName || ip.name;
+    ipNormToImported.set(simaNormKey(src), { name: ip.name, num: simaIpNum(src) });
+  }
+
+  const els = parseSimaCElements(text);
+
+  // --- curve nodes from C01 (circle radius) ---
+  const byIp = new Map();
+  for (const e of els){
+    if (e.type !== "C01") continue;
+    if (!Number.isFinite(e.R) || Math.abs(e.R) < 1e-9) continue;
+    const k = simaNormKey(e.ipRef);
+    if (!byIp.has(k)) byIp.set(k, { Rs: [] });
+    byIp.get(k).Rs.push(e.R);
+  }
+
+  const curveNodes = [];
+  for (const [k, rec] of byIp.entries()){
+    const info = ipNormToImported.get(k);
+    if (!info) continue;
+    const Rs = rec.Rs.filter(v=>Number.isFinite(v) && Math.abs(v)>1e-9);
+    if (!Rs.length) continue;
+    const Rsigned = Rs[0]; // duplicates are common; take first
+    curveNodes.push({
+      key: k,
+      name: info.name,
+      num: info.num,
+      Rsigned,
+      Rabs: Math.abs(Rsigned),
+      dir: (Rsigned < 0) ? "right" : "left",
+      entryA: 0,
+      exitA: 0,
+    });
+  }
+  curveNodes.sort((a,b)=> (a.num??1e9) - (b.num??1e9));
+
+  const tolR = 1e-3;
+  const findCurveNode = (rSigned, locNum, side)=>{
+    if (!Number.isFinite(rSigned) || Math.abs(rSigned) < 1e-9) return null;
+    const sgn = (rSigned < 0) ? -1 : 1;
+    const absR = Math.abs(rSigned);
+
+    const matches = curveNodes.filter(n=>{
+      if (!Number.isFinite(n.Rsigned)) return false;
+      const nsgn = (n.Rsigned < 0) ? -1 : 1;
+      if (nsgn !== sgn) return false;
+      return Math.abs(n.Rabs - absR) <= tolR;
+    });
+    if (!matches.length) return null;
+
+    if (Number.isFinite(locNum)){
+      if (side === "before"){
+        const cand = matches.filter(n=>Number.isFinite(n.num) && n.num <= locNum);
+        if (cand.length) return cand.reduce((p,c)=> (c.num > p.num) ? c : p, cand[0]);
+      }
+      if (side === "after"){
+        const cand = matches.filter(n=>Number.isFinite(n.num) && n.num >= locNum);
+        if (cand.length) return cand.reduce((p,c)=> (c.num < p.num) ? c : p, cand[0]);
+      }
+      // fallback closest
+      return matches.slice().sort((a,b)=>Math.abs((a.num??0)-locNum)-Math.abs((b.num??0)-locNum))[0];
+    }
+
+    return matches[0];
+  };
+
+  // --- assign spirals (C02) to nearest curve nodes ---
+  for (const e of els){
+    if (e.type !== "C02") continue;
+    const A = e.A;
+    const R1 = e.R1, R2 = e.R2;
+    if (!Number.isFinite(A) || A <= 0) continue;
+
+    const locNum = simaIpNum(e.ipRef);
+
+    const z0 = (v)=> Number.isFinite(v) && Math.abs(v) < 1e-9;
+
+    if (z0(R1) && !z0(R2)) {
+      // straight -> curve (entry)
+      const n = findCurveNode(R2, locNum, "after");
+      if (n) n.entryA = Math.max(n.entryA, A);
+      continue;
+    }
+    if (z0(R2) && !z0(R1)) {
+      // curve -> straight (exit)
+      const n = findCurveNode(R1, locNum, "before");
+      if (n) n.exitA = Math.max(n.exitA, A);
+      continue;
+    }
+    if (!z0(R1) && !z0(R2)) {
+      // curve -> curve (compound): split as exit of R1 and entry of R2
+      const n1 = findCurveNode(R1, locNum, "before");
+      const n2 = findCurveNode(R2, locNum, "after");
+      if (n1) n1.exitA = Math.max(n1.exitA, A);
+      if (n2) n2.entryA = Math.max(n2.entryA, A);
+      continue;
+    }
+  }
+
+  // --- build curveSettings (use A-mode: A from C02) ---
+  const curveSettings = [];
+  for (const n of curveNodes){
+    const R = n.Rabs;
+    if (!(Number.isFinite(R) && R > 0)) continue;
+    const A1 = (n.entryA > 0) ? n.entryA : 0;
+    let A2 = (n.exitA > 0) ? n.exitA : 0;
+    if (A2 === 0 && A1 > 0) A2 = A1;
+
+    curveSettings.push({
+      id: curveSettings.length + 1,
+      ipName: n.name,
+      R,
+      A1,
+      A2,
+      direction: n.dir,
+      ds
+    });
+  }
+  return curveSettings;
+}
+
 
 // parse XRF (RoadGM) and return {bp,ep,ips,curveSettings?,staPitch?}
 function parseXrfRoadGM(xmlText){
@@ -695,20 +915,15 @@ function applyPlanImport(result, mode, msgText){
   state.useIpCount = state.ipPoints.length;
 
 
-  if (mode === "xrf") {
-    if (Array.isArray(result.curveSettings) && result.curveSettings.length){
-      state.curveSettings = result.curveSettings;
-    } else {
-      // keep existing but align ipName if possible
-      state.curveSettings = [];
-    }
-    if (Number.isFinite(result.staPitch) && result.staPitch>0){
-      state.staPitch = Math.round(result.staPitch);
-      state.outputStep = Math.round(result.staPitch);
-    }
+  if (Array.isArray(result.curveSettings) && result.curveSettings.length){
+    state.curveSettings = result.curveSettings;
   } else {
-    // SIMA: we can import geometry points, but curve settings are not guaranteed
     state.curveSettings = [];
+  }
+
+  if (Number.isFinite(result.staPitch) && result.staPitch > 0){
+    state.staPitch = Math.round(result.staPitch);
+    state.outputStep = Math.round(result.staPitch);
   }
 
   // enforce IP1..IPn naming (no gaps)
@@ -1430,7 +1645,7 @@ const parseStaPitch = (token, pitch) => {
 const setOrNull = (v)=> {
   const t = String(v ?? "").trim();
   if (t === "") return null;
-  const n = parseFloat(t.replace(/,/g,"."));
+  const n = parseNumLoose(t);
   return Number.isFinite(n) ? n : null;
 };
 
@@ -1501,7 +1716,7 @@ const bindExtraUI = (groupKey, rootEl, pitch)=> {
       if (!row) return;
       const t = String(e.target.value ?? "").trim();
       if (t === "") { render(); return; }
-      const n = parseFloat(t.replace(/,/g,"."));
+      const n = parseNumLoose(t);
       if (!Number.isFinite(n)) { render(); return; }
       row.m = n;
       saveState();
@@ -2025,7 +2240,7 @@ const bindCrossSlopeUI = (rootEl)=>{
         if (!r) return;
         const t = String(e.target.value ?? "").trim();
         if (t === "") { render(); return; }
-        const n = parseFloat(t.replace(/,/g,"."));
+        const n = parseNumLoose(t);
         if (!Number.isFinite(n)) { render(); return; }
         r.end = n;
         sortCrossSegs(scope, side, staKey);
@@ -2070,7 +2285,7 @@ const bindCrossSlopeUI = (rootEl)=>{
         if (!r) return;
         const t = String(e.target.value ?? "").trim();
         if (t === "") { render(); return; }
-        const n = parseFloat(t.replace(/,/g,"."));
+        const n = parseNumLoose(t);
         if (!Number.isFinite(n)) { render(); return; }
         r.mode = 'pct';
         r.slopePct = n;
@@ -2116,7 +2331,7 @@ rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="
         if (!r) return;
         const t = String(e.target.value ?? "").trim();
         if (t === "") { render(); return; }
-        const n = parseFloat(t.replace(/,/g,"."));
+        const n = parseNumLoose(t);
         if (!Number.isFinite(n) || n <= 0) { render(); return; }
         r.mode = 'ratio';
         r.ratioX = n;
@@ -2623,6 +2838,90 @@ const computeAlignment = (ipPoints, curveSettings, dsSpiral, clothoidMode) => {
   return { segments, keypoints, total: curSta, warnings };
 };
 
+
+const computeAlignmentFromElements = (bp, startAzDeg, elements, dsSpiralDefault) => {
+  const warnings = [];
+  const segments = [];
+  const keypoints = [];
+
+  const bpN = Number(bp?.N ?? 0);
+  const bpE = Number(bp?.E ?? 0);
+  const bpName = bp?.name || 'BP';
+  let curX = bpE, curY = bpN, curSta = 0;
+  let psi = psiFromAz(Number.isFinite(Number(startAzDeg)) ? Number(startAzDeg) : 0);
+
+  keypoints.push({ name: bpName, sta: 0, N: curY, E: curX, az: azFromPsi(psi) });
+
+  const pushEndKey = (nm) => {
+    const name = String(nm || '').trim();
+    if (!name) return;
+    keypoints.push({ name, sta: curSta, N: curY, E: curX, az: azFromPsi(psi) });
+  };
+
+  const els = Array.isArray(elements) ? elements : [];
+  for (let i=0; i<els.length; i++) {
+    const el = els[i] || {};
+    const type = el.type;
+    const dir = (el.dir === 'right') ? 'right' : 'left';
+    const turnSign = (dir === 'left') ? 1 : -1;
+    const R = Number(el.R);
+    const ds = Number.isFinite(Number(el.ds)) && Number(el.ds) > 0 ? Number(el.ds) : dsSpiralDefault;
+
+    if (type === 'straight') {
+      const L = Number(el.L);
+      if (!Number.isFinite(L) || L <= 0) { warnings.push(`要素${i+1}: 直線Lが不正`); continue; }
+      const x1 = curX + Math.cos(psi) * L;
+      const y1 = curY + Math.sin(psi) * L;
+      const seg = new SegmentStraight(curSta, curX, curY, x1, y1);
+      segments.push(seg);
+      curSta = seg.s1;
+      curX = x1; curY = y1;
+      pushEndKey(el.endName);
+      continue;
+    }
+
+    if (type === 'arc') {
+      if (!Number.isFinite(R) || R <= 0) { warnings.push(`要素${i+1}: 円弧Rが不正`); continue; }
+      let Lc = Number(el.Lc);
+      if (!Number.isFinite(Lc) || Lc <= 0) {
+        const dDeg = Number(el.dDeg);
+        if (!Number.isFinite(dDeg) || dDeg <= 0) { warnings.push(`要素${i+1}: 円弧Lc/Δが不正`); continue; }
+        Lc = R * (dDeg * Math.PI / 180);
+      }
+      const seg = new SegmentArc(curSta, curX, curY, psi, R, Lc, turnSign);
+      segments.push(seg);
+      curSta = seg.s1;
+      const end = seg.eval(seg.s1);
+      curX = end.E; curY = end.N;
+      psi = psiFromAz(end.az);
+      pushEndKey(el.endName);
+      continue;
+    }
+
+    if (type === 'spiral_in' || type === 'spiral_out') {
+      if (!Number.isFinite(R) || R <= 0) { warnings.push(`要素${i+1}: クロソイドRが不正`); continue; }
+      let Ls = Number(el.Ls);
+      if (!Number.isFinite(Ls) || Ls <= 0) {
+        const A = Number(el.A);
+        if (!Number.isFinite(A) || A <= 0) { warnings.push(`要素${i+1}: クロソイドLs/Aが不正`); continue; }
+        Ls = (A * A) / R;
+      }
+      const mode = (type === 'spiral_in') ? 'in' : 'out';
+      const sp = new SegmentSpiral(curSta, curX, curY, psi, R, Ls, turnSign, mode, ds);
+      segments.push(sp);
+      curSta = sp.s1;
+      const end = sp.endState();
+      curX = end.x; curY = end.y; psi = end.psi;
+      pushEndKey(el.endName);
+      continue;
+    }
+
+    warnings.push(`要素${i+1}: typeが不明`);
+  }
+
+  return { segments, keypoints, total: curSta, warnings };
+};
+
 /* =========================
    Work points + stations
 ========================= */
@@ -2923,11 +3222,24 @@ const viewCross = document.getElementById("viewCross");
 const viewOutput = document.getElementById("viewOutput");
 const viewSave = document.getElementById("viewSave");
 
+
 const computeAll = () => {
+  const mode = (state.planInputMode === 'elem') ? 'elem' : 'ip';
+  if (mode === 'elem') {
+    const startAz = Number.isFinite(Number(state.planStartAz)) ? Number(state.planStartAz) : 0;
+    const res = computeAlignmentFromElements(state.bp, startAz, state.planElements, state.dsSpiral);
+    const endPt = (res.segments?.length) ? evalAlignment(res.segments, res.total) : { N: state.bp.N, E: state.bp.E, az: startAz };
+    const workPoints = [
+      { name: state.bp.name || 'BP', N: state.bp.N, E: state.bp.E },
+      { name: state.ep.name || 'EP', N: endPt.N, E: endPt.E },
+    ];
+    return { workPoints, res };
+  }
   const workPoints = getWorkPoints();
   const res = computeAlignment(workPoints, state.curveSettings, state.dsSpiral, state.clothoidMode);
   return { workPoints, res };
 };
+
 
 const render = () => {
   document.getElementById("projectName").value = state.projectName;
@@ -2964,6 +3276,10 @@ const render = () => {
     }
   }
   const pitch = Math.max(1, Math.floor(state.staPitch||1));
+  const planMode = (state.planInputMode === 'elem') ? 'elem' : 'ip';
+  const planStartAz = Number.isFinite(Number(state.planStartAz)) ? Number(state.planStartAz) : 0;
+  const planEndPt = (planMode === 'elem' && res.segments?.length) ? evalAlignment(res.segments, res.total) : null;
+
 
 
   // coord catalog (CSV)
@@ -2982,7 +3298,7 @@ const render = () => {
         <div>
           <label>ファイル（.sim / .sima / .xrf）</label>
           <input id="planImportFile" type="file" />
-          <div class="mini">SIMA(.sim / .sima)は点名からBP/IP/EPの座標を読み込みます（曲線設定は空）。XRF(.xrf)はBP/IP/EPと曲線設定を可能な範囲で復元します。</div>
+          <div class="mini">SIMA(.sim / .sima)はBP/IP/EPと、SIMA内のC01/C02があれば曲線設定も可能な範囲で復元します。XRF(.xrf)も同様に復元します。</div>
         </div>
         <div>
           <label>読み込み</label>
@@ -3057,7 +3373,86 @@ const render = () => {
       <div class="mini" style="margin-top:8px;">座標は m。通常は小数3桁、必要に応じて4桁。</div>
     </div>
 
-    <div class="card">
+    <div class="card" id="secPlanMode">
+      <h2>平面線形：入力方式</h2>
+      <div class="grid grid-3">
+        <div>
+          <label>方式</label>
+          <div class="grid grid-2">
+            <label class="mini"><input type="radio" name="planMode" id="planModeIp" value="ip" ${planMode==='ip'?'checked':''}/> IP法</label>
+            <label class="mini"><input type="radio" name="planMode" id="planModeElem" value="elem" ${planMode==='elem'?'checked':''}/> 要素法</label>
+          </div>
+          <div class="mini" style="margin-top:8px;">IP法＝座標（BP/IP/EP）＋曲線設定。要素法＝開始方位角＋要素列</div>
+        </div>
+        <div>
+          <label>要素法：開始方位角AZ（度）</label>
+          <input id="planStartAz" type="text" inputmode="decimal" autocomplete="off" value="${planStartAz}" ${planMode==='elem'?'':'disabled'} />
+          <div class="mini">0°=北、90°=東。要素法のみ使用</div>
+        </div>
+        <div>
+          <label>要素法：計算EP（参考）</label>
+          <div class="grid grid-2" style="margin-top:8px;">
+            <div><div class="mini">N</div><div class="mono">${planEndPt? Number(planEndPt.N).toFixed(d): ''}</div></div>
+            <div><div class="mini">E</div><div class="mono">${planEndPt? Number(planEndPt.E).toFixed(d): ''}</div></div>
+          </div>
+          <div class="mini">※要素法ではEP入力は使わず、計算EPを出力に使います</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="secPlanElements" style="display:${planMode==='elem'?'':'none'};">
+      <h2>要素法：要素列（BPから順）</h2>
+      <div class="grid grid-3">
+        <div>
+          <button class="btn" id="addPlanElem">+ 要素追加</button>
+          <div class="mini" style="margin-top:8px;">終点名は任意（TS/SC/CS/ST等）</div>
+        </div>
+        <div class="mini">クロソイド：A または Ls のどちらかを入力（A指定は Ls=A²/R）</div>
+        <div class="mini">円弧：Lc または Δ（度）のどちらかを入力</div>
+      </div>
+
+      <div style="overflow:auto; margin-top:10px;">
+        <table>
+          <thead>
+            <tr>
+              <th>終点名</th><th>type</th><th>dir</th>
+              <th>R</th><th>A</th><th>Ls</th><th>Δ(度)</th><th>Lc</th><th>L(直線)</th><th>ds</th><th class="right">削除</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(state.planElements||[]).map(e=>`
+              <tr>
+                <td><input data-pe-name="${e.id}" type="text" value="${escHtml(e.endName||'')}" placeholder="TS等"/></td>
+                <td>
+                  <select data-pe-type="${e.id}">
+                    ${[
+                      ['straight','straight'],
+                      ['spiral_in','spiral_in'],
+                      ['arc','arc'],
+                      ['spiral_out','spiral_out'],
+                    ].map(([v,lab])=>`<option value="${v}" ${e.type===v?'selected':''}>${lab}</option>`).join('')}
+                  </select>
+                </td>
+                <td>
+                  <select data-pe-dir="${e.id}">
+                    ${['left','right'].map(v=>`<option value="${v}" ${e.dir===v?'selected':''}>${v}</option>`).join('')}
+                  </select>
+                </td>
+                <td><input data-pe-r="${e.id}" type="text" inputmode="decimal" value="${e.R??''}"/></td>
+                <td><input data-pe-a="${e.id}" type="text" inputmode="decimal" value="${e.A??''}"/></td>
+                <td><input data-pe-ls="${e.id}" type="text" inputmode="decimal" value="${e.Ls??''}"/></td>
+                <td><input data-pe-dd="${e.id}" type="text" inputmode="decimal" value="${e.dDeg??''}"/></td>
+                <td><input data-pe-lc="${e.id}" type="text" inputmode="decimal" value="${e.Lc??''}"/></td>
+                <td><input data-pe-l="${e.id}" type="text" inputmode="decimal" value="${e.L??''}"/></td>
+                <td><input data-pe-ds="${e.id}" type="text" inputmode="decimal" value="${e.ds??''}"/></td>
+                <td class="right"><button class="btn btn-ghost" data-pe-del="${e.id}">削除</button></td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" id="secPlanIP" style="display:${planMode==='ip'?'':'none'};">
       <h2>IP点（BP→IP1..IPk→EP）</h2>
       <div class="grid grid-3">
         <div>
@@ -3096,7 +3491,7 @@ const render = () => {
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="secPlanCurves" style="display:${planMode==='ip'?'':'none'};">
       <h2>曲線設定（IP名ごと）</h2>
       <div class="grid grid-3">
         <div class="mini">direction: auto/left/right/none、R>0 のとき曲線として扱います</div>
@@ -3141,7 +3536,7 @@ const render = () => {
       <div class="grid grid-3">
         <div><b>総延長</b>：<span class="kpi">${res.total.toFixed(3)} m</span></div>
         <div class="pill">警告 ${res.warnings.length} 件</div>
-        <div class="pill">IP数 ${state.ipPoints.length}（使用 ${state.useIpCount}）</div>
+        <div class="pill">${planMode==='ip' ? `IP数 ${state.ipPoints.length}（使用 ${state.useIpCount}）` : `要素数 ${(state.planElements||[]).length}`} </div>
       </div>
       ${res.warnings.map(w=>`<div class="warn">⚠ ${w}</div>`).join("")}
     </div>
@@ -3261,7 +3656,15 @@ const render = () => {
           if (!pts.length) throw new Error("SIMAからA01座標点が見つかりませんでした");
           const {bp, ep} = pickBpEpFromPoints(pts);
           const ips = extractIpPointsFromSima(pts);
-          applyPlanImport({ bp:{N:bp.x,E:bp.y}, ep:{N:ep.x,E:ep.y}, ips }, "sim", `SIMA読み込み：IP ${ips.length}点`);
+
+          const staPitch = parseSimaStaPitch(text);
+          const curveSettings = buildCurveSettingsFromSima(text, ips, state.dsSpiral);
+
+          applyPlanImport(
+            { bp:{N:bp.x,E:bp.y}, ep:{N:ep.x,E:ep.y}, ips, curveSettings, staPitch },
+            "sim",
+            `SIMA読み込み：IP ${ips.length}点 / 曲線設定 ${curveSettings.length}件`
+          );
           return;
         }
 
@@ -3363,7 +3766,7 @@ const render = () => {
 const commit_bpN = ()=>{
   const t = String(in_bpN.value ?? "").trim();
   if (t === "") { render(); return; }
-  const n = parseFloat(t.replace(/,/g,"."));
+  const n = parseNumLoose(t);
   if (!Number.isFinite(n)) { render(); return; }
   state.bp.N = n;
   saveState(); render();
@@ -3374,7 +3777,7 @@ in_bpN.onblur = commit_bpN;
 const commit_bpE = ()=>{
   const t = String(in_bpE.value ?? "").trim();
   if (t === "") { render(); return; }
-  const n = parseFloat(t.replace(/,/g,"."));
+  const n = parseNumLoose(t);
   if (!Number.isFinite(n)) { render(); return; }
   state.bp.E = n;
   saveState(); render();
@@ -3385,7 +3788,7 @@ in_bpE.onblur = commit_bpE;
 const commit_epN = ()=>{
   const t = String(in_epN.value ?? "").trim();
   if (t === "") { render(); return; }
-  const n = parseFloat(t.replace(/,/g,"."));
+  const n = parseNumLoose(t);
   if (!Number.isFinite(n)) { render(); return; }
   state.ep.N = n;
   saveState(); render();
@@ -3396,13 +3799,94 @@ in_epN.onblur = commit_epN;
 const commit_epE = ()=>{
   const t = String(in_epE.value ?? "").trim();
   if (t === "") { render(); return; }
-  const n = parseFloat(t.replace(/,/g,"."));
+  const n = parseNumLoose(t);
   if (!Number.isFinite(n)) { render(); return; }
   state.ep.E = n;
   saveState(); render();
 };
 in_epE.onchange = commit_epE;
 in_epE.onblur = commit_epE;
+
+
+  // --- Plan mode (ip / elem) ---
+  const pmIp = document.getElementById('planModeIp');
+  const pmElem = document.getElementById('planModeElem');
+  if (pmIp && pmElem) {
+    pmIp.checked = (state.planInputMode !== 'elem');
+    pmElem.checked = (state.planInputMode === 'elem');
+    pmIp.onchange = ()=>{ if (pmIp.checked) { state.planInputMode='ip'; saveState(); render(); } };
+    pmElem.onchange = ()=>{ if (pmElem.checked) { state.planInputMode='elem'; saveState(); render(); } };
+  }
+
+  const in_startAz = document.getElementById('planStartAz');
+  if (in_startAz) {
+    in_startAz.value = Number.isFinite(Number(state.planStartAz)) ? String(state.planStartAz) : '0';
+    const commit = ()=>{
+      const t = String(in_startAz.value ?? '').trim();
+      if (t === '') { state.planStartAz = 0; saveState(); render(); return; }
+      const n = parseNumLoose(t);
+      if (!Number.isFinite(n)) { render(); return; }
+      state.planStartAz = n;
+      saveState(); render();
+    };
+    in_startAz.onchange = commit;
+    in_startAz.onblur = commit;
+  }
+
+  const btnAddPe = document.getElementById('addPlanElem');
+  if (btnAddPe) {
+    btnAddPe.onclick = ()=>{
+      const newId = Number.isFinite(Number(state.nextPlanElemId)) ? Number(state.nextPlanElemId) : (Math.max(0, ...(state.planElements||[]).map(e=>e.id||0)) + 1);
+      state.planElements = Array.isArray(state.planElements) ? state.planElements : [];
+      state.planElements.push({ id:newId, endName:'', type:'straight', dir:'left', R:null, A:null, Ls:null, dDeg:null, Lc:null, L:null, ds:null });
+      state.nextPlanElemId = newId + 1;
+      saveState(); render();
+    };
+  }
+
+  // element field commits
+  const peById = (id)=> (state.planElements||[]).find(e=>e.id===id);
+  const setNumField = (obj, key, txt)=>{
+    const t = String(txt ?? '').trim();
+    if (t === '') { obj[key] = null; return true; }
+    const n = parseNumLoose(t);
+    if (!Number.isFinite(n)) return false;
+    obj[key] = n; return true;
+  };
+
+  viewPlan.querySelectorAll('input[data-pe-name]').forEach(inp=>{
+    const id = parseInt(inp.getAttribute('data-pe-name'),10);
+    const commit = ()=>{ const o=peById(id); if(!o) return; o.endName=String(inp.value??''); saveState(); render(); };
+    inp.onchange = commit; inp.onblur = commit;
+  });
+  viewPlan.querySelectorAll('select[data-pe-type]').forEach(sel=>{
+    const id = parseInt(sel.getAttribute('data-pe-type'),10);
+    sel.onchange = ()=>{ const o=peById(id); if(!o) return; o.type=sel.value; saveState(); render(); };
+  });
+  viewPlan.querySelectorAll('select[data-pe-dir]').forEach(sel=>{
+    const id = parseInt(sel.getAttribute('data-pe-dir'),10);
+    sel.onchange = ()=>{ const o=peById(id); if(!o) return; o.dir=sel.value; saveState(); render(); };
+  });
+  for (const [attr,key] of [
+    ['data-pe-r','R'],['data-pe-a','A'],['data-pe-ls','Ls'],['data-pe-dd','dDeg'],['data-pe-lc','Lc'],['data-pe-l','L'],['data-pe-ds','ds'],
+  ]) {
+    viewPlan.querySelectorAll(`input[${attr}]`).forEach(inp=>{
+      const id = parseInt(inp.getAttribute(attr),10);
+      const commit = ()=>{
+        const o=peById(id); if(!o) return;
+        if (!setNumField(o, key, inp.value)) { render(); return; }
+        saveState(); render();
+      };
+      inp.onchange = commit; inp.onblur = commit;
+    });
+  }
+  viewPlan.querySelectorAll('button[data-pe-del]').forEach(btn=>{
+    const id = parseInt(btn.getAttribute('data-pe-del'),10);
+    btn.onclick = ()=>{
+      state.planElements = (state.planElements||[]).filter(e=>e.id!==id);
+      saveState(); render();
+    };
+  });
 
   const useIp = document.getElementById("useIpCount");
   useIp.value = Math.max(0, Math.min(state.useIpCount, state.ipPoints.length));
@@ -3424,6 +3908,10 @@ in_epE.onblur = commit_epE;
     state.outputStep=20;
     state.dsSpiral=0.5;
     state.clothoidMode="A";
+    state.planInputMode="ip";
+    state.planStartAz=0;
+    state.planElements=[];
+    state.nextPlanElemId=1;
     state.bp={name:"BP",N:0,E:0};
     state.ep={name:"EP",N:0,E:500};
     state.ipPoints=[
@@ -3490,7 +3978,7 @@ in_epE.onblur = commit_epE;
       if (!p) return;
       const t = String(e.target.value ?? "").trim();
       if (t === "") { render(); return; }
-      const n = parseFloat(t.replace(/,/g,"."));
+      const n = parseNumLoose(t);
       if (!Number.isFinite(n)) { render(); return; }
       p.N = n;
       saveState(); render();
@@ -3505,7 +3993,7 @@ in_epE.onblur = commit_epE;
       if (!p) return;
       const t = String(e.target.value ?? "").trim();
       if (t === "") { render(); return; }
-      const n = parseFloat(t.replace(/,/g,"."));
+      const n = parseNumLoose(t);
       if (!Number.isFinite(n)) { render(); return; }
       p.E = n;
       saveState(); render();
@@ -3550,7 +4038,7 @@ in_epE.onblur = commit_epE;
         if (opt.allowNull) c[key] = null;
         render(); return;
       }
-      const n = parseFloat(t.replace(/,/g,"."));
+      const n = parseNumLoose(t);
       if (!Number.isFinite(n)) { render(); return; }
       if (opt.min != null && n < opt.min) { render(); return; }
       c[key] = n;
@@ -3579,7 +4067,7 @@ viewPlan.querySelectorAll("button[data-c-del]").forEach(btn=>{
   const commitPlotStep = ()=>{
     const t = String(inPlotStep.value ?? "").trim();
     if (t === "") { render(); return; }
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { render(); return; }
     state.plotStep = Math.max(0.1, n);
     saveState(); render();
@@ -3801,7 +4289,7 @@ const inStartSta = document.getElementById("startSta");
   const commitStartSta = ()=>{
     const t = String(inStartSta.value ?? "").trim();
     if (t === "") { render(); return; }
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { render(); return; }
     state.profile.startSta = n;
     saveState(); render();
@@ -3812,7 +4300,7 @@ const inStartZ = document.getElementById("startZ");
   const commitStartZ = ()=>{
     const t = String(inStartZ.value ?? "").trim();
     if (t === "") { render(); return; }
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { render(); return; }
     state.profile.startZ = n;
     saveState(); render();
@@ -3850,7 +4338,7 @@ viewProfile.querySelectorAll("input[data-g-nextsta]").forEach(inp=>{
     if (!r) return;
     const t = String(v ?? "").trim();
     if (t === "") { if (commit) render(); return; } // 空欄は未確定扱い
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { if (commit) render(); return; }
     r.nextSta = n;
     if (commit) { saveState(); render(); }
@@ -3866,7 +4354,7 @@ viewProfile.querySelectorAll("input[data-g-grade]").forEach(inp=>{
     if (!r) return;
     const t = String(v ?? "").trim();
     if (t === "") { if (commit) render(); return; }
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { if (commit) render(); return; }
     r.gradePct = n;
     if (commit) { saveState(); render(); }
@@ -3915,7 +4403,7 @@ viewProfile.querySelectorAll("select[data-vc-vpi]").forEach(sel=>{
     if (!r) return;
     const t = String(e.target.value ?? "").trim();
     if (t === "") { render(); return; }
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { render(); return; }
     r.vpiSta = n;
     saveState(); render();
@@ -3929,7 +4417,7 @@ viewProfile.querySelectorAll("input[data-vc-l]").forEach(inp=>{
     if (!r) return;
     const t = String(v ?? "").trim();
     if (t === "") { r.L = null; if (commit) { saveState(); render(); } return; }
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { if (commit) render(); return; } // 途中入力は保持
     r.L = n;
     if (commit) { saveState(); render(); }
@@ -3945,7 +4433,7 @@ viewProfile.querySelectorAll("input[data-vc-y]").forEach(inp=>{
     if (!r) return;
     const t = String(v ?? "").trim();
     if (t === "") { r.ymax = null; if (commit) { saveState(); render(); } return; }
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { if (commit) render(); return; }
     r.ymax = n;
     if (commit) { saveState(); render(); }
@@ -3970,7 +4458,7 @@ if (inProfPlot) {
   const commitProfPlot = ()=>{
     const t = String(inProfPlot.value ?? "").trim();
     if (t === "") { render(); return; }
-    const n = parseFloat(t.replace(/,/g,"."));
+    const n = parseNumLoose(t);
     if (!Number.isFinite(n)) { render(); return; }
     state.profilePlotStep = Math.max(0.1, n);
     saveState(); render();
