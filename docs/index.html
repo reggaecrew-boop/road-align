@@ -2436,22 +2436,37 @@ rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="
     });
 
     // step abs input
+    // iOS などで「段差の数値入力 → 方向選択」を続けて行うと、onchange/blur が発火する前に再描画されて
+    // 値が 0.000 に戻ることがあるため、oninput で state に先に反映しておく
     rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepabs]`).forEach(inp=>{
       const id = parseInt(inp.getAttribute('data-xs-id'),10);
-      const commit = (e)=>{
+      const apply = (raw, commit=false)=>{
         const store = getCrossStore(scope, side, staKey);
         const r = (store.segs||[]).find(x=>x.id===id);
         if (!r) return;
-        const t = String(e.target.value ?? "").trim();
-        const abs = (t === "") ? 0 : parseFloat(t.replace(/,/g,"."));
-        if (!Number.isFinite(abs) || abs < 0) { render(); return; }
-        const dir = (r.stepDz != null && Number(r.stepDz) < 0) ? -1 : 1;
-        r.stepDz = dir * abs;
-        saveState();
-        render();
+        const t = String(raw ?? "").trim();
+        if (t === "") {
+          // 空欄は 0 として扱う（ただし入力中は再描画しない）
+          r.stepDz = 0;
+          if (commit) { saveState(); render(); }
+          return;
+        }
+        const n = parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(n)) {
+          if (commit) render();
+          return;
+        }
+        // 基本は「方向(select)側の設定」を尊重するため、既存符号を維持
+        // ただしユーザーが負号を入れた場合は down と解釈
+        let dir = (r.stepDz != null && Number(r.stepDz) < 0) ? -1 : 1;
+        if (n < 0) dir = -1;
+        r.stepDz = dir * Math.abs(n);
+        if (commit) { saveState(); render(); }
       };
-      inp.onchange = commit;
-      inp.onblur = commit;
+
+      inp.oninput  = (e)=> apply(e.target.value, false);
+      inp.onchange = (e)=> apply(e.target.value, true);
+      inp.onblur   = inp.onchange;
     });
 
     // step direction
