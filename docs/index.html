@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>道路線形計算（iPadオフラインPWA） v18.8.11</title>
+  <title>道路線形計算（iPadオフラインPWA）</title>
 
   <!-- PWA -->
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_8_11");
+      navigator.serviceWorker.register("./sw.js?v=18_9_0");
     }
   </script>
 
@@ -87,6 +87,12 @@
     .header.collapsed{ padding:10px 14px; }
     .header.collapsed #headerBody{ display:none; }
     .header.collapsed .badge{ display:none; }
+
+    /* cross elements */
+    .xsElemList{ border:1px solid var(--line); border-radius:12px; padding:6px; background:#fff; }
+    .xsRow{ margin:6px 0; border:1px solid var(--line); border-radius:12px; }
+    .xsRow.dragging{ opacity:.6; }
+
   </style>
 </head>
 
@@ -94,8 +100,7 @@
 <div class="wrap">
   <div class="header" id="topHeader">
     <div class="title">
-      道路線形計算（iPadオフラインPWA）
-      <span class="badge" id="appVer">v18.8.11</span>
+      道路線形計算（iPadオフラインPWA） <span class="badge" id="appVerBadge">v18.8.11</span>
       <span class="badge">同一ページ：平面 → 縦断 → 出力 → 保存 / 自動保存（localStorage）</span>
       <button id="btnHeaderToggle" class="btn btn-ghost headerToggle" type="button" aria-label="ヘッダ表示切替">▲</button>
     </div>
@@ -147,6 +152,7 @@
 </div>
 
 <script>
+
 // --- diagnostics (v18.8.3) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
@@ -428,10 +434,7 @@ function normalizeState(s) {
       const ratioX = Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20;
       const ratioDir = (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : (slopePct >= 0 ? 'up' : 'down');
       const stepDz = Number.isFinite(Number(r && r.stepDz)) ? Number(r.stepDz) : 0;
-      const wb = (r && typeof r.wb === 'string') ? r.wb : '';
-      const stepAbsText = (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : '';
-      const stepDir = (r && (r.stepDir === 'up' || r.stepDir === 'down')) ? r.stepDir : (stepDz < 0 ? 'down' : 'up');
-      return { id, end, mode, slopePct, ratioX, ratioDir, wb, stepAbsText, stepDir, stepDz };
+      return { id, end, mode, slopePct, ratioX, ratioDir, stepDz };
     }).filter(r => Number.isFinite(r.end) && r.end > 0);
 
     segs.sort((a,b)=>a.end-b.end);
@@ -1264,18 +1267,19 @@ const crossRowSlopePct = (r)=>{
   return Number(r && r.slopePct) || 0;
 };
 const crossRowStepDz = (r)=>{
-  if (!r) return 0;
-  // Prefer text-preserved fields (v18.8.11)
-  const dir = (r.stepDir === "down") ? -1 : 1;
-  const t = (typeof r.stepAbsText === "string") ? r.stepAbsText.trim() : "";
-  if (t !== "") {
-    const n = parseFloat(t.replace(/,/g,"."));
-    if (Number.isFinite(n)) return dir * Math.abs(n);
+  // Prefer typed text + direction if present, to keep UI stable on iOS
+  const dir = (r && (r.stepDir === 'down' || r.stepDir === 'up')) ? r.stepDir : null;
+  const t = (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : null;
+  if (dir && t != null) {
+    const s = normalizeJpNum(t).trim();
+    if (s === "") return 0;
+    const n = parseFloat(s.replace(/,/g,"."));
+    if (!Number.isFinite(n)) return 0;
+    const abs = Math.abs(n);
+    return (dir === 'down') ? -abs : abs;
   }
-  // Fallback legacy numeric
-  const dz = Number(r.stepDz);
-  if (Number.isFinite(dz)) return dz;
-  return 0;
+  const v = Number(r && r.stepDz);
+  return Number.isFinite(v) ? v : 0;
 };
 
 // "割分" parser: supports "1割5分2厘", "5分", "2分5厘", "5%".
@@ -1859,19 +1863,20 @@ const ensureCrossState = ()=>{
   const ensureSide = (obj)=>{
     obj = (obj && typeof obj === 'object' && !Array.isArray(obj)) ? obj : { segs: [], nextSegId: 1 };
     if (!Array.isArray(obj.segs)) obj.segs = [];
+    
     obj.segs = obj.segs.map((r, idx)=>({
       id: (r && Number.isFinite(r.id)) ? r.id : (idx + 1),
       end: Number(r && r.end),
-      mode: (r && typeof r.mode === 'string') ? r.mode : 'pct',
+      mode: (r && (r.mode === 'pct' || r.mode === 'ratio')) ? r.mode : 'pct',
       slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
-      ratioX: Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20,
+      wb: (r && typeof r.wb === 'string') ? r.wb : "",
+      ratioX: (r && Number.isFinite(Number(r.ratioX)) && Number(r.ratioX) > 0) ? Number(r.ratioX) : 20,
       ratioDir: (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r && r.slopePct)||0) >= 0 ? 'up' : 'down'),
-      wb: (r && typeof r.wb === 'string') ? r.wb : '',
-      stepAbsText: (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : '',
-      stepDir: (r && (r.stepDir === 'up' || r.stepDir === 'down')) ? r.stepDir : 'up',
+      stepDir: (r && (r.stepDir === 'up' || r.stepDir === 'down')) ? r.stepDir : ((Number(r && r.stepDz)||0) < 0 ? 'down' : 'up'),
+      stepAbsText: (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : (Number.isFinite(Number(r && r.stepDz)) ? String(Math.abs(Number(r.stepDz))) : "0.000"),
       stepDz: Number.isFinite(Number(r && r.stepDz)) ? Number(r.stepDz) : 0,
     }));
-    if (!Number.isFinite(obj.nextSegId)) {
+if (!Number.isFinite(obj.nextSegId)) {
       const mx = Math.max(0, ...obj.segs.map(r=>r.id||0));
       obj.nextSegId = mx + 1;
     }
@@ -1890,7 +1895,328 @@ const ensureCrossState = ()=>{
 
   const sel = state.cross.ui.selectedStaKey;
   if (sel && !state.cross.overrides[sel]) state.cross.ui.selectedStaKey = "";
+
+  // --- Phase1: xrange/base + elements (v18.9.0) ---
+  if (!state.cross.xrangeDefault || typeof state.cross.xrangeDefault !== 'object' || Array.isArray(state.cross.xrangeDefault)) {
+    // default clip range equals current lastEnd
+    const cr0 = computeCrossRowsFromSegs(state.cross.right?.segs||[]);
+    const cl0 = computeCrossRowsFromSegs(state.cross.left?.segs||[]);
+    state.cross.xrangeDefault = { L: Number.isFinite(cl0.lastEnd)? cl0.lastEnd : 5.0, R: Number.isFinite(cr0.lastEnd)? cr0.lastEnd : 5.0 };
+  }
+  if (!Number.isFinite(Number(state.cross.xrangeDefault.L)) || Number(state.cross.xrangeDefault.L) <= 0) state.cross.xrangeDefault.L = 5.0;
+  if (!Number.isFinite(Number(state.cross.xrangeDefault.R)) || Number(state.cross.xrangeDefault.R) <= 0) state.cross.xrangeDefault.R = 5.0;
+
+  if (!state.cross.xrangeOverrides || typeof state.cross.xrangeOverrides !== 'object' || Array.isArray(state.cross.xrangeOverrides)) state.cross.xrangeOverrides = {};
+
+  if (!state.cross.baseDefault || typeof state.cross.baseDefault !== 'object' || Array.isArray(state.cross.baseDefault)) state.cross.baseDefault = { type: "CL" };
+  if (typeof state.cross.baseDefault.type !== 'string') state.cross.baseDefault.type = "CL";
+  if (!state.cross.baseOverrides || typeof state.cross.baseOverrides !== 'object' || Array.isArray(state.cross.baseOverrides)) state.cross.baseOverrides = {};
+
+  if (!state.cross.elemCommon || typeof state.cross.elemCommon !== 'object' || Array.isArray(state.cross.elemCommon)) {
+    state.cross.elemCommon = { right:{ items:[], nextId:1 }, left:{ items:[], nextId:1 } };
+  }
+  const ensureElemSide = (sideKey)=>{
+    const es = state.cross.elemCommon[sideKey];
+    if (!es || typeof es !== 'object' || Array.isArray(es)) state.cross.elemCommon[sideKey] = { items:[], nextId:1 };
+    if (!Array.isArray(state.cross.elemCommon[sideKey].items)) state.cross.elemCommon[sideKey].items = [];
+    if (!Number.isFinite(Number(state.cross.elemCommon[sideKey].nextId))) {
+      const mx = Math.max(0, ...state.cross.elemCommon[sideKey].items.map(it=>Number(it?.id)||0));
+      state.cross.elemCommon[sideKey].nextId = mx + 1;
+    }
+  };
+  ensureElemSide('right'); ensureElemSide('left');
+
+  if (!state.cross.templates || typeof state.cross.templates !== 'object' || Array.isArray(state.cross.templates)) {
+    state.cross.templates = { items: [], nextId: 1 };
+  }
 };
+
+// =========================
+// Cross (Phase1): Elements
+// =========================
+const CROSS_ELEM_TYPES = { PAV:'PAV', STEP:'STEP', SLOPE_H:'SLOPE_H', SLOPE_EXT:'SLOPE_EXT', FLAT:'FLAT' };
+
+const parseNumSafe = (v)=>{ const n = Number(String(v??'').trim()); return Number.isFinite(n) ? n : null; };
+
+const slopePctFromRatioX = (x)=> (x>0 ? (100.0 / x) : 0);
+
+const buildElemFromSegs = (segs)=>{
+  const out = [];
+  segs = (Array.isArray(segs)?segs:[]).slice().sort((a,b)=>{
+    const ea = Number(a?.end)||0, eb = Number(b?.end)||0;
+    if (Math.abs(ea-eb)>1e-12) return ea-eb;
+    return (Number(a?.id)||0)-(Number(b?.id)||0);
+  });
+  let x0 = 0;
+  for (const r of segs) {
+    const end = Number(r?.end);
+    if (!Number.isFinite(end) || end<=0) continue;
+    const span = end - x0;
+    const slope = crossRowSlopePct(r);
+    const stepDz = crossRowStepDz(r);
+    if (span > 1e-9) {
+      out.push({ id: out.length+1, type: 'PAV', L: span, pctText: slope.toFixed(3) });
+    }
+    if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) {
+      out.push({ id: out.length+1, type: 'STEP', dzText: Math.abs(stepDz).toFixed(3), dir: (stepDz<0?'down':'up') });
+    }
+    x0 = end;
+  }
+  return out;
+};
+
+const ensureElemCommonInitialized = ()=>{
+  ensureCrossState();
+  const r = state.cross.elemCommon?.right?.items || [];
+  const l = state.cross.elemCommon?.left?.items || [];
+  if (!r.length && Array.isArray(state.cross.right?.segs) && state.cross.right.segs.length) {
+    state.cross.elemCommon.right.items = buildElemFromSegs(state.cross.right.segs);
+    state.cross.elemCommon.right.nextId = Math.max(0, ...state.cross.elemCommon.right.items.map(it=>it.id||0)) + 1;
+  }
+  if (!l.length && Array.isArray(state.cross.left?.segs) && state.cross.left.segs.length) {
+    state.cross.elemCommon.left.items = buildElemFromSegs(state.cross.left.segs);
+    state.cross.elemCommon.left.nextId = Math.max(0, ...state.cross.elemCommon.left.items.map(it=>it.id||0)) + 1;
+  }
+};
+
+const getXrangeForStaKey = (staKey)=>{
+  ensureCrossState();
+  const d = state.cross.xrangeDefault || {L:5,R:5};
+  const ov = (staKey && state.cross.xrangeOverrides && state.cross.xrangeOverrides[staKey]) ? state.cross.xrangeOverrides[staKey] : null;
+  const L = Number.isFinite(Number(ov?.L)) ? Number(ov.L) : Number(d.L);
+  const R = Number.isFinite(Number(ov?.R)) ? Number(ov.R) : Number(d.R);
+  return { L: Math.max(0, L), R: Math.max(0, R), source: ov ? 'override' : 'default' };
+};
+
+const elemsToSegs = (items, sideKey, widthLimit)=>{
+  items = Array.isArray(items) ? items : [];
+  const segs = [];
+  let id = 1;
+  let end = 0;
+  const clampEnd = (e)=> (Number.isFinite(widthLimit) && widthLimit>0 ? Math.min(e, widthLimit) : e);
+
+  // helper to push a span segment
+  const pushSpan = (L, slopePct)=>{
+    const nL = Number(L);
+    if (!Number.isFinite(nL) || nL <= 0) return;
+    const newEnd = clampEnd(end + nL);
+    if (newEnd <= end + 1e-12) return;
+    segs.push({ id: id++, end: newEnd, mode:'pct', slopePct: Number(slopePct)||0, wb:'', ratioX:20, ratioDir: ((Number(slopePct)||0)>=0?'up':'down'), stepDir:'up', stepAbsText:'0.000', stepDz:0 });
+    end = newEnd;
+  };
+  const pushStep = (dz, dir)=>{
+    const n = Number(dz);
+    if (!Number.isFinite(n) || n===0) return;
+    const signed = (dir==='down') ? -Math.abs(n) : Math.abs(n);
+    segs.push({ id: id++, end: clampEnd(end), mode:'pct', slopePct: (segs.length?segs[segs.length-1].slopePct:0), wb:'', ratioX:20, ratioDir: ((segs.length?segs[segs.length-1].slopePct:0)>=0?'up':'down'),
+      stepDir: (dir==='down'?'down':'up'), stepAbsText: Math.abs(n).toFixed(3), stepDz: signed });
+  };
+
+  // Build until widthLimit reached
+  for (let i=0;i<items.length;i++){
+    const it = items[i] || {};
+    if (Number.isFinite(widthLimit) && widthLimit>0 && end >= widthLimit - 1e-9) break;
+
+    if (it.type==='PAV' || it.type==='FLAT'){
+      const pct = (it.type==='FLAT') ? 0 : (parseNumSafe(it.pctText) ?? 0);
+      pushSpan(parseNumSafe(it.L) ?? 0, pct);
+      continue;
+    }
+    if (it.type==='STEP'){
+      const dz = parseNumSafe(it.dzText) ?? 0;
+      const dir = (it.dir==='down')?'down':'up';
+      pushStep(dz, dir);
+      continue;
+    }
+    if (it.type==='SLOPE_H'){
+      const x = parseNumSafe(it.ratioX) ?? 0;
+      const H = parseNumSafe(it.H) ?? 0;
+      const dir = (it.dir==='down')?'down':'up';
+      if (x>0 && H>0){
+        const pctAbs = slopePctFromRatioX(x);
+        const pct = (dir==='down') ? -pctAbs : pctAbs;
+        pushSpan(H*x, pct);
+      }
+      continue;
+    }
+    if (it.type==='SLOPE_EXT'){
+      // handled after loop as extension
+      continue;
+    }
+  }
+
+  // extension: if last is SLOPE_EXT and end < widthLimit
+  const last = items.length ? items[items.length-1] : null;
+  if (last && last.type==='SLOPE_EXT' && Number.isFinite(widthLimit) && widthLimit>0 && end < widthLimit - 1e-9){
+    const x = parseNumSafe(last.ratioX) ?? 0;
+    const dir = (last.dir==='down')?'down':'up';
+    if (x>0){
+      const pctAbs = slopePctFromRatioX(x);
+      const pct = (dir==='down') ? -pctAbs : pctAbs;
+      pushSpan(widthLimit - end, pct);
+    }
+  } else {
+    // If no explicit EXT, optionally extend with last slope? (Phase1: do not)
+  }
+
+  // guarantee last end equals widthLimit if widthLimit is set and segs exist
+  if (Number.isFinite(widthLimit) && widthLimit>0 && segs.length){
+    const lastEnd = segs[segs.length-1].end;
+    if (lastEnd < widthLimit - 1e-6){
+      // keep flat extension? no (Phase1)
+    }
+  }
+
+  return segs;
+};
+
+const syncCrossCommonSegsFromElems = ()=>{
+  ensureElemCommonInitialized();
+  // Common uses default xrange
+  const xr = getXrangeForStaKey("");
+  state.cross.right.segs = elemsToSegs(state.cross.elemCommon.right.items, 'right', xr.R);
+  state.cross.left.segs  = elemsToSegs(state.cross.elemCommon.left.items, 'left', xr.L);
+  state.cross.right.nextSegId = Math.max(0, ...state.cross.right.segs.map(r=>r.id||0)) + 1;
+  state.cross.left.nextSegId  = Math.max(0, ...state.cross.left.segs.map(r=>r.id||0)) + 1;
+};
+
+
+const renderCrossElemListHtml = (sideKey)=>{
+  ensureElemCommonInitialized();
+  const items = state.cross.elemCommon?.[sideKey]?.items || [];
+  const selId = Number(state.cross.ui?.elemSel?.[sideKey] || 0);
+
+  const optType = (v)=>[
+    ['PAV','路面(%)'],['STEP','段差'],['SLOPE_H','法面(H)'],['SLOPE_EXT','法面(延長)'],['FLAT','水平(0%)']
+  ].map(([k,l])=>`<option value="${k}" ${v===k?'selected':''}>${l}</option>`).join('');
+
+  const dirSel = (v)=>`<option value="up" ${v==='up'?'selected':''}>上</option><option value="down" ${v==='down'?'selected':''}>下</option>`;
+
+  const rowHtml = (it)=>{
+    const id = Number(it?.id)||0;
+    const type = String(it?.type||'PAV');
+    const selClass = (id===selId) ? ' style="outline:2px solid var(--accent); border-radius:12px; padding:8px;"' : ' style="padding:8px;"';
+    let inputs = '';
+    if (type==='PAV'){
+      inputs = `
+        <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+          <div style="width:120px;"><label>長さL(m)</label><input class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="L" type="number" step="0.001" value="${Number(it?.L||0).toFixed(3)}"/></div>
+          <div style="width:120px;"><label>勾配(%)</label><input class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="pctText" type="text" inputmode="decimal" value="${escHtml(String(it?.pctText??'0.000'))}"/></div>
+        </div>`;
+    } else if (type==='FLAT'){
+      inputs = `
+        <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+          <div style="width:120px;"><label>長さL(m)</label><input class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="L" type="number" step="0.001" value="${Number(it?.L||0).toFixed(3)}"/></div>
+          <div class="mini" style="margin-bottom:10px;">0%</div>
+        </div>`;
+    } else if (type==='STEP'){
+      inputs = `
+        <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+          <div style="width:120px;"><label>段差ΔZ(m)</label><input class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="dzText" type="text" inputmode="decimal" value="${escHtml(String(it?.dzText??'0.000'))}"/></div>
+          <div style="width:120px;"><label>方向</label><select class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="dir">${dirSel(it?.dir||'up')}</select></div>
+        </div>`;
+    } else if (type==='SLOPE_H'){
+      inputs = `
+        <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+          <div style="width:120px;"><label>法面 1:X</label><input class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="ratioX" type="number" step="0.001" value="${Number(it?.ratioX||1.5)}"/></div>
+          <div style="width:120px;"><label>高さH(m)</label><input class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="H" type="number" step="0.001" value="${Number(it?.H||1.0)}"/></div>
+          <div style="width:120px;"><label>方向</label><select class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="dir">${dirSel(it?.dir||'down')}</select></div>
+        </div>`;
+    } else if (type==='SLOPE_EXT'){
+      inputs = `
+        <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+          <div style="width:120px;"><label>法面 1:X</label><input class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="ratioX" type="number" step="0.001" value="${Number(it?.ratioX||1.5)}"/></div>
+          <div style="width:120px;"><label>方向</label><select class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="dir">${dirSel(it?.dir||'down')}</select></div>
+          <div class="mini" style="margin-bottom:10px;">横断範囲まで延長</div>
+        </div>`;
+    }
+
+    return `
+      <div class="xsRow" data-id="${id}" ${selClass}>
+        <div style="display:flex; gap:10px; align-items:flex-start;">
+          <button class="btn btn-ghost xsDrag" type="button" style="width:auto; padding:6px 10px;">≡</button>
+          <div style="flex:1;">
+            <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
+              <div style="width:160px;">
+                <label>種類</label>
+                <select class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="type">
+                  ${optType(type)}
+                </select>
+              </div>
+              <div style="flex:1; min-width:260px;">
+                ${inputs}
+              </div>
+            </div>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:6px; width:90px;">
+            <button class="btn btn-ghost" type="button" data-xs-act="dup" data-xs-side="${sideKey}" data-xs-id="${id}" style="width:auto;">複製</button>
+            <button class="btn btn-ghost" type="button" data-xs-act="del" data-xs-side="${sideKey}" data-xs-id="${id}" style="width:auto;">削除</button>
+          </div>
+        </div>
+      </div>
+    `;
+  };
+
+  return items.map(rowHtml).join('') || `<div class="mini" style="padding:8px;">（まだエレメントがありません。下の＋ボタンで追加）</div>`;
+};
+
+// Drag reorder (pointer-based)
+const enableElemDrag = (sideKey)=>{
+  const list = document.getElementById('xsElemList_'+sideKey);
+  if (!list) return;
+  const handleSelector = '.xsDrag';
+  let dragging = null; // {id, startY}
+  const onPointerDown = (ev)=>{
+    const h = ev.target.closest(handleSelector);
+    if (!h) return;
+    const row = ev.target.closest('.xsRow');
+    if (!row) return;
+    const itemId = Number(row.dataset.id);
+    if (!Number.isFinite(itemId)) return;
+    ev.preventDefault();
+    row.setPointerCapture?.(ev.pointerId);
+    dragging = { itemId, pointerId: ev.pointerId };
+    row.classList.add('dragging');
+  };
+  const onPointerMove = (ev)=>{
+    if (!dragging || ev.pointerId !== dragging.pointerId) return;
+    const rows = Array.from(list.querySelectorAll('.xsRow'));
+    const curIdx = rows.findIndex(r=>Number(r.dataset.id)===dragging.itemId);
+    if (curIdx<0) return;
+    const y = ev.clientY;
+    // find nearest row center
+    let tgtIdx = curIdx;
+    let best = Infinity;
+    rows.forEach((r, idx)=>{
+      const b = r.getBoundingClientRect();
+      const cy = (b.top+b.bottom)/2;
+      const d = Math.abs(cy - y);
+      if (d < best){ best = d; tgtIdx = idx; }
+    });
+    if (tgtIdx !== curIdx){
+      const arr = state.cross.elemCommon[sideKey].items;
+      const from = arr.findIndex(it=>Number(it.id)===dragging.itemId);
+      if (from>=0){
+        const [it] = arr.splice(from,1);
+        arr.splice(tgtIdx,0,it);
+        syncCrossCommonSegsFromElems();
+        saveState();
+        render();
+      }
+    }
+  };
+  const onPointerUp = (ev)=>{
+    if (!dragging || ev.pointerId !== dragging.pointerId) return;
+    const row = list.querySelector('.xsRow.dragging');
+    if (row) row.classList.remove('dragging');
+    dragging = null;
+  };
+  list.addEventListener('pointerdown', onPointerDown);
+  list.addEventListener('pointermove', onPointerMove);
+  list.addEventListener('pointerup', onPointerUp);
+  list.addEventListener('pointercancel', onPointerUp);
+};
+
 
 const cloneCrossSide = (src)=>{
   const segs = (src?.segs || []).map((r, i)=>({
@@ -1900,9 +2226,6 @@ const cloneCrossSide = (src)=>{
     slopePct: Number(r?.slopePct) || 0,
     ratioX: Number.isFinite(Number(r?.ratioX)) ? Number(r.ratioX) : 20,
     ratioDir: (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r?.slopePct)||0) >= 0 ? 'up' : 'down'),
-    wb: (r && typeof r.wb === 'string') ? r.wb : '',
-    stepAbsText: (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : '',
-    stepDir: (r && (r.stepDir === 'up' || r.stepDir === 'down')) ? r.stepDir : ((Number(r?.stepDz)||0) < 0 ? 'down' : 'up'),
     stepDz: Number(r?.stepDz) || 0,
   })).filter(r => Number.isFinite(r.end) && r.end > 0);
   const mx = Math.max(0, ...segs.map(r=>r.id||0));
@@ -1951,10 +2274,7 @@ const normalizeCrossToOuterEnd = (store, endVal)=>{
       const ratioX = Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20;
       const ratioDir = (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : (slopePct >= 0 ? 'up' : 'down');
       const stepDz = Number.isFinite(Number(r && r.stepDz)) ? Number(r.stepDz) : 0;
-      const wb = (r && typeof r.wb === 'string') ? r.wb : '';
-      const stepAbsText = (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : '';
-      const stepDir = (r && (r.stepDir === 'up' || r.stepDir === 'down')) ? r.stepDir : (stepDz < 0 ? 'down' : 'up');
-      return { id, end, mode, slopePct, ratioX, ratioDir, wb, stepAbsText, stepDir, stepDz };
+      return { id, end, mode, slopePct, ratioX, ratioDir, stepDz };
     })
     .filter(r => Number.isFinite(r.end) && r.end > 0);
 
@@ -1980,19 +2300,20 @@ const normalizeCrossToOuterEnd = (store, endVal)=>{
 
 const applyCrossOuterEnd = (rightEnd, leftEnd, affectOverrides)=>{
   ensureCrossState();
-  normalizeCrossToOuterEnd(getCrossStore("common","right"), rightEnd);
-  normalizeCrossToOuterEnd(getCrossStore("common","left"),  leftEnd);
-  sortCrossSegs("common","right");
-  sortCrossSegs("common","left");
+  // Phase1: treat as clip range (xrange)
+  const r = Number(rightEnd);
+  const l = Number(leftEnd);
+  if (Number.isFinite(r) && r > 0) state.cross.xrangeDefault.R = r;
+  if (Number.isFinite(l) && l > 0) state.cross.xrangeDefault.L = l;
 
   if (affectOverrides) {
     for (const k of Object.keys(state.cross.overrides || {})) {
-      normalizeCrossToOuterEnd(getCrossStore("ovr","right", k), rightEnd);
-      normalizeCrossToOuterEnd(getCrossStore("ovr","left",  k), leftEnd);
-      sortCrossSegs("ovr","right", k);
-      sortCrossSegs("ovr","left",  k);
+      // store per-station clip range (safe, no geometry rewrite)
+      state.cross.xrangeOverrides[k] = { L: state.cross.xrangeDefault.L, R: state.cross.xrangeDefault.R };
     }
   }
+  // Rebuild common segs to match clip range
+  syncCrossCommonSegsFromElems();
 };
 
 const computeCrossSide = (scope, side, staKey)=>{
@@ -2015,7 +2336,7 @@ const computeCrossSide = (scope, side, staKey)=>{
     if (!Number.isFinite(end) || end <= 0) { warnings.push('end<=0 の行があります'); continue; }
     const span = end - start;
     if (span < -1e-9) { warnings.push('距離が昇順ではありません'); continue; }
-    if (Math.abs(span) < 1e-9) { warnings.push('同一距離(end)の行があります'); }
+    if (Math.abs(span) < 1e-9 && !(Number.isFinite(stepDz) && Math.abs(stepDz) > 0)) { warnings.push('同一距離(end)の行があります'); }
 
     const dzSlope = (slopePct/100.0) * span;
     z += dzSlope;
@@ -2047,7 +2368,7 @@ const computeCrossRowsFromSegs = (segs)=>{
     if (!Number.isFinite(end) || end <= 0) { warnings.push('end<=0 の行があります'); continue; }
     const span = end - start;
     if (span < -1e-9) { warnings.push('距離が昇順ではありません'); continue; }
-    if (Math.abs(span) < 1e-9) { warnings.push('同一距離(end)の行があります'); }
+    if (Math.abs(span) < 1e-9 && !(Number.isFinite(stepDz) && Math.abs(stepDz) > 0)) { warnings.push('同一距離(end)の行があります'); }
     const dzSlope = (slopePct/100.0) * span;
     z += dzSlope;
     if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) z += stepDz;
@@ -2167,7 +2488,7 @@ const widenCrossSegsFromCommon = (commonSegs, targetW, anchor)=>{
   }
 
   if (!cleaned.length) {
-    cleaned.push({ end: Number(targetW.toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', wb:'', stepAbsText:'', stepDir:'up', stepDz: 0 });
+    cleaned.push({ end: Number(targetW.toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', stepDz: 0 });
   } else {
     const prevEnd = (cleaned.length>=2) ? cleaned[cleaned.length-2].end : 0;
     cleaned[cleaned.length-1].end = Number(Math.max(targetW, prevEnd).toFixed(3));
@@ -2309,7 +2630,7 @@ const bindCrossSlopeUI = (rootEl)=>{
       addBtn.onclick = ()=>{
         const store = getCrossStore(scope, side, staKey);
         const last = Math.max(0, ...(store.segs||[]).map(r=>Number(r.end)||0));
-        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', wb:'', stepAbsText:'', stepDir:'up', stepDz: 0 });
+        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', stepDz: 0 });
         sortCrossSegs(scope, side, staKey);
         saveState();
         render();
@@ -2360,7 +2681,6 @@ const bindCrossSlopeUI = (rootEl)=>{
         if (!r) return;
         const v = String(e.target.value||'pct');
         r.mode = (v === 'ratio') ? 'ratio' : 'pct';
-        // keep r.wb (typed text)
         if (!Number.isFinite(Number(r.ratioX))) r.ratioX = 20;
         if (r.mode === 'ratio') {
           // keep direction, compute slopePct for compatibility
@@ -2389,7 +2709,6 @@ const bindCrossSlopeUI = (rootEl)=>{
         if (!Number.isFinite(n)) { render(); return; }
         r.mode = 'pct';
         r.slopePct = n;
-        // keep r.wb (typed text)
         saveState();
         render();
       };
@@ -2465,27 +2784,45 @@ rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="
       selEl.onblur = commit;
     });
 
-    // step abs input (keep typed text)
+    // step abs input
+    // iOS/Safari の number 入力は確定時に 0 へ正規化されることがあるため、
+    // 入力文字列は stepAbsText として保持し、計算は別で数値化する
     rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepabs]`).forEach(inp=>{
       const id = parseInt(inp.getAttribute('data-xs-id'),10);
-      const setVal = (raw, commit=false)=>{
+      const apply = (raw, commit=false)=>{
         const store = getCrossStore(scope, side, staKey);
         const r = (store.segs||[]).find(x=>x.id===id);
         if (!r) return;
+
         r.stepAbsText = String(raw ?? "");
-        // keep legacy numeric too (for backward-compat paths)
-        const dir = (r.stepDir === 'down') ? -1 : 1;
-        const t = r.stepAbsText.trim();
-        const n = t==="" ? 0 : parseFloat(t.replace(/,/g,"."));
-        r.stepDz = (Number.isFinite(n) ? dir * Math.abs(n) : 0);
+        // 数値化できる場合だけ stepDz を更新（プレビュー列用）
+        const s = normalizeJpNum(r.stepAbsText).trim();
+        if (s === "") {
+          r.stepDz = 0;
+          if (commit) { saveState(); render(); }
+          return;
+        }
+        const n = parseFloat(s.replace(/,/g,"."));
+        if (!Number.isFinite(n)) {
+          if (commit) render();
+          return;
+        }
+        if (r.stepDir !== 'up' && r.stepDir !== 'down') {
+          r.stepDir = (Number(r.stepDz)||0) < 0 ? 'down' : 'up';
+        }
+        const abs = Math.abs(n);
+        r.stepDz = (r.stepDir === 'down') ? -abs : abs;
+
         if (commit) { saveState(); render(); }
       };
-      inp.oninput  = (e)=> setVal(e.target.value, false);
-      inp.onchange = (e)=> setVal(e.target.value, true);
+
+      inp.oninput  = (e)=> apply(e.target.value, false);
+      inp.onchange = (e)=> apply(e.target.value, true);
       inp.onblur   = inp.onchange;
     });
 
-    // step direction (keep selected even when 0)
+
+    // step direction
     rootEl.querySelectorAll(`select[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepdir]`).forEach(selEl=>{
       const id = parseInt(selEl.getAttribute('data-xs-id'),10);
       const commit = (e)=>{
@@ -2494,17 +2831,22 @@ rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="
         if (!r) return;
         const v = String(e.target.value||'up');
         r.stepDir = (v === 'down') ? 'down' : 'up';
-        // refresh legacy numeric from current text
-        const dir = (r.stepDir === 'down') ? -1 : 1;
-        const t = (typeof r.stepAbsText === 'string') ? r.stepAbsText.trim() : '';
-        const n = t==="" ? 0 : parseFloat(t.replace(/,/g,"."));
-        r.stepDz = (Number.isFinite(n) ? dir * Math.abs(n) : 0);
+
+        // 入力文字列が数値化できるなら stepDz も同期
+        const s = normalizeJpNum(String(r.stepAbsText ?? "")).trim();
+        const n = s==="" ? 0 : parseFloat(s.replace(/,/g,"."));
+        if (Number.isFinite(n)) {
+          const abs = Math.abs(n);
+          r.stepDz = (r.stepDir === 'down') ? -abs : abs;
+        }
+
         saveState();
         render();
       };
       selEl.onchange = commit;
       selEl.onblur = commit;
     });
+
 
     rootEl.querySelectorAll(`button[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-del]`).forEach(btn=>{
       const id = parseInt(btn.getAttribute('data-xs-del'),10);
@@ -4317,8 +4659,9 @@ bindExtraUI("profile", viewProfile, pitch);
 
 /* -------- CROSS -------- */
   ensureCrossState();
-
-  const cr = computeCrossSide("common", "right");
+  ensureElemCommonInitialized();
+  syncCrossCommonSegsFromElems();
+const cr = computeCrossSide("common", "right");
   const cl = computeCrossSide("common", "left");
 
   const selKey = state.cross.ui.selectedStaKey || "";
@@ -4353,9 +4696,8 @@ bindExtraUI("profile", viewProfile, pitch);
       const slopePct = crossRowSlopePct(r);
       const stepDz = crossRowStepDz(r);
       const stepAbs = Math.abs(Number(stepDz)||0);
-      const stepDir = (Number(stepDz)||0) >= 0 ? 'up' : 'down';
-      const stepAbsText = (r && typeof r.stepAbsText === "string") ? r.stepAbsText : (stepAbs>0 ? stepAbs.toFixed(3) : "");
-      const stepDirPref = (r && (r.stepDir === "up" || r.stepDir === "down")) ? r.stepDir : stepDir;
+      const stepAbsText = (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : stepAbs.toFixed(3);
+      const stepDir = (r && (r.stepDir==='up' || r.stepDir==='down')) ? r.stepDir : ((Number(stepDz)||0) >= 0 ? 'up' : 'down');
       const wbText = (r && typeof r.wb === 'string') ? r.wb : '';
       const wbInfo = parseWaribun(wbText);
       let wbPreviewPct = null;
@@ -4403,10 +4745,10 @@ bindExtraUI("profile", viewProfile, pitch);
           </td>
           <td>
             <div class="row" style="gap:6px; align-items:center;">
-              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepabs type="text" inputmode="decimal" autocomplete="off" value="${xmlEscape(stepAbsText)}" placeholder="0.000" style="width:110px;" />
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepabs type="text" inputmode="decimal" value="${xmlEscape(stepAbsText)}" style="width:110px;" />
               <select data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepdir>
-                <option value="up" ${stepDirPref==='up'?'selected':''}>上</option>
-                <option value="down" ${stepDirPref==='down'?'selected':''}>下</option>
+                <option value="up" ${stepDir==='up'?'selected':''}>上</option>
+                <option value="down" ${stepDir==='down'?'selected':''}>下</option>
               </select>
             </div>
             <div class="mini">段差（この終了点で瞬時に反映）</div>
@@ -4436,21 +4778,21 @@ bindExtraUI("profile", viewProfile, pitch);
 
   viewCross.innerHTML = `
     <div class="card" id="secCross">
-      <h2>横断：勾配区間（中心 → 外側）</h2>
+      <h2>横断：エレメント（中心 → 外側）</h2>
       <div class="mini">中心から外側へ、任意距離で勾配変化点を作れます。距離は自動で昇順に整列されます。</div>
 
       <div class="row" style="margin-top:10px;">
         <div style="width:200px;">
-          <label>全測点 最外端距離 右(+)(m)</label>
-          <input id="bulkCrossEnd_right" type="number" step="0.001" min="0" value="${cr.lastEnd.toFixed(3)}" />
+          <label>横断範囲（クリップ） 右(+)(m)</label>
+          <input id="bulkCrossEnd_right" type="number" step="0.001" min="0" value="${Number(state.cross.xrangeDefault?.R||cr.lastEnd).toFixed(3)}" />
         </div>
         <div style="width:200px;">
-          <label>全測点 最外端距離 左(-)(m)</label>
-          <input id="bulkCrossEnd_left" type="number" step="0.001" min="0" value="${cl.lastEnd.toFixed(3)}" />
+          <label>横断範囲（クリップ） 左(-)(m)</label>
+          <input id="bulkCrossEnd_left" type="number" step="0.001" min="0" value="${Number(state.cross.xrangeDefault?.L||cl.lastEnd).toFixed(3)}" />
         </div>
         <div style="flex:1; min-width:200px;">
           <label>一括適用</label>
-          <button class="btn" id="applyBulkCrossEnd">最外端を一括更新</button>
+          <button class="btn" id="applyBulkCrossEnd">横断範囲を一括更新</button>
           <div class="mini" style="margin-top:6px;">
             <label class="mini"><input id="bulkAffectOverrides" type="checkbox" checked /> 測点別の例外にも適用</label>
           </div>
@@ -4478,41 +4820,61 @@ bindExtraUI("profile", viewProfile, pitch);
 
       <div class="grid grid-2" style="margin-top:10px;">
         <div>
-          <div class="pill">右側（+） 共通（全測点）</div>
-          <div style="overflow:auto; margin-top:8px;">
-            <table>
-              <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>方式</th><th>入力</th><th>段差ΔZ(m)</th><th class="right">ΔZ(勾配)</th><th class="right">ΔZ(段差)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
-              <tbody>${crossRowsHtml("common", "right")}</tbody>
-            </table>
+          <div class="pill">右側（+）エレメント（共通）</div>
+          <div class="mini">≡を長押し→ドラッグで順序変更。行をタップで選択</div>
+          <div id="xsElemList_right" class="xsElemList">
+            ${renderCrossElemListHtml("right")}
           </div>
-          <div class="row">
-            <div style="flex:1; min-width:160px;"><button class="btn" id="addCrossSeg_right">＋ 右側区間を追加</button></div>
-            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="exampleCrossSeg_right">例を入れる</button></div>
-            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="clearCrossSeg_right">右側を全クリア</button></div>
+          <div class="row" style="margin-top:8px;">
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="PAV" data-xs-side="right">＋ 路面(%)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="STEP" data-xs-side="right">＋ 段差</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="SLOPE_H" data-xs-side="right">＋ 法面(H)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="SLOPE_EXT" data-xs-side="right">＋ 法面(延長)</button></div>
           </div>
-          <div class="mini">最外端：+${cr.lastEnd.toFixed(3)} m / Z=${cr.lastZ.toFixed(3)} m</div>
-          ${warnHtml(cr.warnings)}
         </div>
-
         <div>
-          <div class="pill">左側（-） 共通（全測点）</div>
-          <div style="overflow:auto; margin-top:8px;">
-            <table>
-              <thead><tr><th class="right">開始(m)</th><th>終了(m)</th><th>方式</th><th>入力</th><th>段差ΔZ(m)</th><th class="right">ΔZ(勾配)</th><th class="right">ΔZ(段差)</th><th class="right">Z累積(m)</th><th class="right">操作</th></tr></thead>
-              <tbody>${crossRowsHtml("common", "left")}</tbody>
-            </table>
+          <div class="pill">左側（-）エレメント（共通）</div>
+          <div class="mini">≡を長押し→ドラッグで順序変更。行をタップで選択</div>
+          <div id="xsElemList_left" class="xsElemList">
+            ${renderCrossElemListHtml("left")}
           </div>
-          <div class="row">
-            <div style="flex:1; min-width:160px;"><button class="btn" id="addCrossSeg_left">＋ 左側区間を追加</button></div>
-            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="exampleCrossSeg_left">例を入れる</button></div>
-            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="clearCrossSeg_left">左側を全クリア</button></div>
+          <div class="row" style="margin-top:8px;">
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="PAV" data-xs-side="left">＋ 路面(%)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="STEP" data-xs-side="left">＋ 段差</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="SLOPE_H" data-xs-side="left">＋ 法面(H)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="SLOPE_EXT" data-xs-side="left">＋ 法面(延長)</button></div>
           </div>
-          <div class="mini">最外端：-${cl.lastEnd.toFixed(3)} m / Z=${cl.lastZ.toFixed(3)} m</div>
-          ${warnHtml(cl.warnings)}
         </div>
       </div>
 
       <div class="sep"></div>
+      <div class="row" style="margin-top:0; align-items:flex-end;">
+        <div style="flex:1; min-width:220px;">
+          <label>左右コピー</label>
+          <div class="row" style="margin-top:0;">
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsCopy_r2l_all">右→左（全部）</button></div>
+            <div style="flex:1; min-width:180px;"><button class="btn btn-ghost" id="xsCopy_r2l_to">右→左（ここまで）</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsCopy_r2l_row">右→左（行だけ）</button></div>
+          </div>
+          <div class="row" style="margin-top:0;">
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsCopy_l2r_all">左→右（全部）</button></div>
+            <div style="flex:1; min-width:180px;"><button class="btn btn-ghost" id="xsCopy_l2r_to">左→右（ここまで）</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsCopy_l2r_row">左→右（行だけ）</button></div>
+          </div>
+          <div class="mini">「ここまで」は選択行を含めて置換（以降は残る）</div>
+        </div>
+
+        <div style="width:360px;">
+          <label>テンプレ（現在測点のみ適用）</label>
+          <div class="row" style="margin-top:0;">
+            <div style="flex:1; min-width:140px;"><button class="btn btn-ghost" id="xsTplSave">保存</button></div>
+            <div style="flex:1; min-width:140px;"><button class="btn btn-ghost" id="xsTplApply">適用</button></div>
+            <div style="flex:1; min-width:140px;"><button class="btn btn-ghost" id="xsTplManage">管理</button></div>
+          </div>
+          <div class="mini" id="xsTplInfo"></div>
+        </div>
+      </div>
+
       <div class="mini">例：中心→3.000m -2.000% / 3.000→4.500m 0.000% / 4.500→5.000m -1.000%</div>
 
       <div class="sep"></div>
@@ -4674,6 +5036,266 @@ bindExtraUI("profile", viewProfile, pitch);
       render();
     };
   }
+
+  // --- Phase1: elements UI bindings ---
+  if (!state.cross.ui.elemSel || typeof state.cross.ui.elemSel !== 'object' || Array.isArray(state.cross.ui.elemSel)) {
+    state.cross.ui.elemSel = { right: 0, left: 0 };
+  }
+
+  const setElemSel = (sideKey, id)=>{
+    state.cross.ui.elemSel[sideKey] = Number(id)||0;
+    saveState();
+    render();
+  };
+
+  const findElem = (sideKey, id)=>{
+    const arr = state.cross.elemCommon?.[sideKey]?.items || [];
+    const idx = arr.findIndex(it=>Number(it?.id)===Number(id));
+    return { arr, idx };
+  };
+
+  const deepCopy = (obj)=> JSON.parse(JSON.stringify(obj));
+
+  const ensureDefaultElem = (type)=>{
+    if (type==='PAV') return { type:'PAV', L:1.000, pctText:'0.000' };
+    if (type==='FLAT') return { type:'FLAT', L:1.000 };
+    if (type==='STEP') return { type:'STEP', dzText:'0.200', dir:'up' };
+    if (type==='SLOPE_H') return { type:'SLOPE_H', ratioX:1.5, H:1.0, dir:'down' };
+    if (type==='SLOPE_EXT') return { type:'SLOPE_EXT', ratioX:1.5, dir:'down' };
+    return { type:'PAV', L:1.000, pctText:'0.000' };
+  };
+
+  const bindElemList = (sideKey)=>{
+    const list = document.getElementById('xsElemList_'+sideKey);
+    if (!list) return;
+
+    // selection
+    list.onclick = (ev)=>{
+      const row = ev.target.closest('.xsRow');
+      if (!row) return;
+      const id = Number(row.dataset.id);
+      if (Number.isFinite(id)) setElemSel(sideKey, id);
+    };
+
+    // inputs
+    list.addEventListener('change', (ev)=>{
+      const el = ev.target.closest('.xsElInput');
+      if (!el) return;
+      const id = Number(el.dataset.xsId);
+      const field = String(el.dataset.xsField||'');
+      const side = String(el.dataset.xsSide||sideKey);
+      const { arr, idx } = findElem(side, id);
+      if (idx<0) return;
+      const it = arr[idx];
+
+      if (field==='type'){
+        const t = String(el.value||'PAV');
+        const base = ensureDefaultElem(t);
+        // keep id
+        arr[idx] = Object.assign({ id: it.id }, base);
+      } else if (field==='pctText' || field==='dzText'){
+        it[field] = String(el.value ?? '');
+      } else if (field==='L' || field==='ratioX' || field==='H'){
+        it[field] = Number(el.value);
+      } else if (field==='dir'){
+        it.dir = (String(el.value)==='down') ? 'down' : 'up';
+      }
+
+      syncCrossCommonSegsFromElems();
+      saveState();
+      render();
+    });
+
+    // actions dup/del
+    list.addEventListener('click', (ev)=>{
+      const btn = ev.target.closest('[data-xs-act]');
+      if (!btn) return;
+      ev.preventDefault();
+      const act = btn.dataset.xsAct;
+      const id = Number(btn.dataset.xsId);
+      const side = String(btn.dataset.xsSide||sideKey);
+      const { arr, idx } = findElem(side, id);
+      if (idx<0) return;
+
+      if (act==='del'){
+        arr.splice(idx,1);
+        // selection fallback
+        const next = arr[idx] || arr[idx-1];
+        state.cross.ui.elemSel[side] = next ? next.id : 0;
+      } else if (act==='dup'){
+        const src = deepCopy(arr[idx]);
+        const newId = state.cross.elemCommon[side].nextId++;
+        src.id = newId;
+        arr.splice(idx+1,0,src);
+        state.cross.ui.elemSel[side] = newId;
+      }
+      syncCrossCommonSegsFromElems();
+      saveState();
+      render();
+    });
+
+    enableElemDrag(sideKey);
+  };
+
+  bindElemList('right');
+  bindElemList('left');
+
+  // add buttons (insert after selected row)
+  viewCross.querySelectorAll('[data-xs-add]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const type = String(btn.dataset.xsAdd);
+      const side = String(btn.dataset.xsSide);
+      const arr = state.cross.elemCommon?.[side]?.items;
+      if (!arr) return;
+      const selId = Number(state.cross.ui?.elemSel?.[side]||0);
+      const idx = arr.findIndex(it=>Number(it?.id)===selId);
+      const newId = state.cross.elemCommon[side].nextId++;
+      const it = Object.assign({ id:newId }, ensureDefaultElem(type));
+      if (idx>=0) arr.splice(idx+1,0,it); else arr.push(it);
+      state.cross.ui.elemSel[side] = newId;
+      syncCrossCommonSegsFromElems();
+      saveState();
+      render();
+    };
+  });
+
+  // copy helpers
+  const copyAll = (from,to)=>{
+    state.cross.elemCommon[to].items = deepCopy(state.cross.elemCommon[from].items||[]);
+    state.cross.elemCommon[to].nextId = Math.max(0, ...state.cross.elemCommon[to].items.map(it=>Number(it.id)||0)) + 1;
+  };
+  const copyRow = (from,to)=>{
+    const fromSel = Number(state.cross.ui.elemSel[from]||0);
+    const srcArr = state.cross.elemCommon[from].items||[];
+    const dstArr = state.cross.elemCommon[to].items||[];
+    const srcIdx = srcArr.findIndex(it=>Number(it.id)===fromSel);
+    if (srcIdx<0) { alert('コピー元の行を選択してください'); return; }
+    const src = deepCopy(srcArr[srcIdx]);
+    // insert/replace at dst selection
+    const dstSel = Number(state.cross.ui.elemSel[to]||0);
+    const dstIdx = dstArr.findIndex(it=>Number(it.id)===dstSel);
+    const newId = state.cross.elemCommon[to].nextId++;
+    src.id = newId;
+    if (dstIdx>=0) dstArr.splice(dstIdx,1,src); else dstArr.push(src);
+    state.cross.ui.elemSel[to] = newId;
+  };
+  const copyTo = (from,to)=>{
+    const fromSel = Number(state.cross.ui.elemSel[from]||0);
+    const srcArr = state.cross.elemCommon[from].items||[];
+    const dstArr = state.cross.elemCommon[to].items||[];
+    const srcIdx = srcArr.findIndex(it=>Number(it.id)===fromSel);
+    if (srcIdx<0) { alert('コピー元の行を選択してください'); return; }
+    const head = deepCopy(srcArr.slice(0, srcIdx+1));
+    // re-id for destination (to avoid collisions)
+    let nid = state.cross.elemCommon[to].nextId;
+    head.forEach(it=>{ it.id = nid++; });
+    state.cross.elemCommon[to].nextId = nid;
+    // replace head portion, keep rest
+    const rest = dstArr.slice(srcIdx+1);
+    state.cross.elemCommon[to].items = head.concat(rest);
+    // update selection
+    state.cross.ui.elemSel[to] = head.length ? head[head.length-1].id : 0;
+  };
+
+  const bindCopyBtn = (id, fn)=>{
+    const b = document.getElementById(id);
+    if (b) b.onclick = ()=>{ fn(); syncCrossCommonSegsFromElems(); saveState(); render(); };
+  };
+  bindCopyBtn('xsCopy_r2l_all', ()=>copyAll('right','left'));
+  bindCopyBtn('xsCopy_r2l_row', ()=>copyRow('right','left'));
+  bindCopyBtn('xsCopy_r2l_to',  ()=>copyTo('right','left'));
+  bindCopyBtn('xsCopy_l2r_all', ()=>copyAll('left','right'));
+  bindCopyBtn('xsCopy_l2r_row', ()=>copyRow('left','right'));
+  bindCopyBtn('xsCopy_l2r_to',  ()=>copyTo('left','right'));
+
+  // template (minimal)
+  const tplInfo = document.getElementById('xsTplInfo');
+  const setTplInfo = (msg)=>{ if (tplInfo) tplInfo.textContent = msg||''; };
+
+  const listTplNames = ()=> (state.cross.templates?.items||[]).map(t=>`${t.id}: ${t.name}`).join('\n');
+
+  const tplSaveBtn = document.getElementById('xsTplSave');
+  if (tplSaveBtn) tplSaveBtn.onclick = ()=>{
+    const name = prompt('テンプレ名', '標準');
+    if (!name) return;
+    const tpl = {
+      id: state.cross.templates.nextId++,
+      name: String(name),
+      savedAt: new Date().toISOString(),
+      elem: deepCopy(state.cross.elemCommon),
+      xrange: deepCopy(state.cross.xrangeDefault),
+      base: deepCopy(state.cross.baseDefault)
+    };
+    state.cross.templates.items.push(tpl);
+    saveState();
+    setTplInfo(`保存：${tpl.name}`);
+  };
+
+  const pickTemplate = ()=>{
+    const items = state.cross.templates?.items||[];
+    if (!items.length){ alert('テンプレがありません'); return null; }
+    const hint = listTplNames();
+    const tok = prompt('適用するテンプレのIDを入力\n'+hint, String(items[items.length-1].id));
+    if (!tok) return null;
+    const id = Number(tok);
+    const tpl = items.find(t=>Number(t.id)===id);
+    if (!tpl){ alert('テンプレが見つかりません'); return null; }
+    return tpl;
+  };
+
+  const tplApplyBtn = document.getElementById('xsTplApply');
+  if (tplApplyBtn) tplApplyBtn.onclick = ()=>{
+    const tpl = pickTemplate();
+    if (!tpl) return;
+
+    // target STA: selected override key or preview input
+    let key = String(state.cross.ui.selectedStaKey||'').trim();
+    if (!key){
+      const tok = String(document.getElementById('xsPreviewSta')?.value || state.cross.ui.previewTok || '').trim();
+      if (!tok){ alert('適用先の測点が未指定です（プレビュー測点を入力するか、例外を選択してください）'); return; }
+      try{
+        const m = parseSta100(tok);
+        key = Number(m).toFixed(3);
+      }catch(e){
+        alert('測点を解釈できません'); return;
+      }
+    }
+
+    // apply as station override (safe)
+    state.cross.xrangeOverrides[key] = deepCopy(tpl.xrange);
+    state.cross.baseOverrides[key] = deepCopy(tpl.base);
+
+    const xr = { L: Number(tpl.xrange?.L)||state.cross.xrangeDefault.L, R: Number(tpl.xrange?.R)||state.cross.xrangeDefault.R };
+    const rSegs = elemsToSegs(tpl.elem?.right?.items||[], 'right', xr.R);
+    const lSegs = elemsToSegs(tpl.elem?.left?.items||[],  'left',  xr.L);
+
+    state.cross.overrides[key] = {
+      right: { segs: rSegs, nextSegId: Math.max(0, ...rSegs.map(r=>r.id||0)) + 1 },
+      left:  { segs: lSegs, nextSegId: Math.max(0, ...lSegs.map(r=>r.id||0)) + 1 }
+    };
+
+    state.cross.ui.selectedStaKey = key;
+    saveState();
+    render();
+    setTplInfo(`適用：${tpl.name} → ${key}m`);
+  };
+
+  const tplManageBtn = document.getElementById('xsTplManage');
+  if (tplManageBtn) tplManageBtn.onclick = ()=>{
+    const items = state.cross.templates?.items||[];
+    if (!items.length){ alert('テンプレがありません'); return; }
+    const hint = listTplNames();
+    const tok = prompt('管理：削除するテンプレIDを入力（キャンセルで何もしない）\n'+hint, '');
+    if (!tok) return;
+    const id = Number(tok);
+    const idx = items.findIndex(t=>Number(t.id)===id);
+    if (idx<0){ alert('テンプレが見つかりません'); return; }
+    if (!confirm(`削除しますか？\n${items[idx].name}`)) return;
+    items.splice(idx,1);
+    saveState();
+    setTplInfo('削除しました');
+  };
+
 
   // 例外：選択
   const selEl = document.getElementById("xsOverrideSel");
@@ -5327,6 +5949,7 @@ document.querySelectorAll("[data-jump]").forEach(btn=>{
 })();
 
 render();
+
 </script>
 </body>
 </html>
