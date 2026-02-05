@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.8.3</span></title>
+  <title>道路線形計算（iPadオフラインPWA） <span class="badge" id="appVer">v18.8.10</span></title>
 
   <!-- PWA -->
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_8_4");
+      navigator.serviceWorker.register("./sw.js?v=18_8_10");
     }
   </script>
 
@@ -146,7 +146,7 @@
 </div>
 
 <script>
-// --- diagnostics (v18.8.3) ---
+// --- diagnostics (v18.8.10) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
@@ -1247,7 +1247,7 @@ const xmlEscape = (s) =>
     .replace(/'/g,"&apos;");
 
 
-// Cross segment helpers (v18.8.3)
+// Cross segment helpers (v18.8.10)
 // mode: 'pct' uses slopePct directly, 'ratio' uses 1:X (vertical 1 : horizontal X)
 const crossRowSlopePct = (r)=>{
   const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
@@ -1849,6 +1849,8 @@ const ensureCrossState = ()=>{
       mode: (r && (r.mode === 'pct' || r.mode === 'ratio')) ? r.mode : 'pct',
       // slope (%)
       slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
+      // raw input text for % (keep what user typed)
+      slopeText: (r && typeof r.slopeText === 'string') ? r.slopeText : undefined,
       // 1:X inputs (kept even in pct mode for later switching)
       ratioX: Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20,
       ratioDir: (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r && r.slopePct)||0) >= 0 ? 'up' : 'down'),
@@ -1857,6 +1859,8 @@ const ensureCrossState = ()=>{
       // step (signed) and direction (keep direction even when stepDz==0)
       stepDz: Number.isFinite(Number(r && r.stepDz)) ? Number(r.stepDz) : 0,
       stepDir: (r && (r.stepDir === 'up' || r.stepDir === 'down')) ? r.stepDir : (((Number(r && r.stepDz)||0) < 0) ? 'down' : 'up'),
+      // raw input text for step abs (keep what user typed)
+      stepAbsText: (r && typeof r.stepAbsText === 'string') ? r.stepAbsText : undefined,
     }));
     if (!Number.isFinite(obj.nextSegId)) {
       const mx = Math.max(0, ...obj.segs.map(r=>r.id||0));
@@ -1886,7 +1890,11 @@ const cloneCrossSide = (src)=>{
     mode: (r && typeof r.mode === 'string') ? r.mode : 'pct',
     slopePct: Number(r?.slopePct) || 0,
     ratioX: Number.isFinite(Number(r?.ratioX)) ? Number(r.ratioX) : 20,
+    slopeText: (typeof r?.slopeText==='string') ? r.slopeText : undefined,
     ratioDir: (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r?.slopePct)||0) >= 0 ? 'up' : 'down'),
+    wb: (typeof r?.wb==='string') ? r.wb : '',
+    stepDir: (r && (r.stepDir==='up' || r.stepDir==='down')) ? r.stepDir : (((Number(r?.stepDz)||0)<0)?'down':'up'),
+    stepAbsText: (typeof r?.stepAbsText==='string') ? r.stepAbsText : undefined,
     stepDz: Number(r?.stepDz) || 0,
   })).filter(r => Number.isFinite(r.end) && r.end > 0);
   const mx = Math.max(0, ...segs.map(r=>r.id||0));
@@ -2290,7 +2298,7 @@ const bindCrossSlopeUI = (rootEl)=>{
       addBtn.onclick = ()=>{
         const store = getCrossStore(scope, side, staKey);
         const last = Math.max(0, ...(store.segs||[]).map(r=>Number(r.end)||0));
-        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), mode: 'pct', slopePct: 0.0, ratioX: 20, ratioDir: 'down', stepDz: 0 });
+        store.segs.push({ id: store.nextSegId++, end: Number((last + 1.0).toFixed(3)), mode: 'pct', slopePct: 0.0, slopeText: '0.000', ratioX: 20, ratioDir: 'down', wb:'', stepDz: 0, stepDir:'up', stepAbsText:'0.000' });
         sortCrossSegs(scope, side, staKey);
         saveState();
         render();
@@ -2357,25 +2365,43 @@ const bindCrossSlopeUI = (rootEl)=>{
       selEl.onblur = commit;
     });
 
-    // % slope input (when mode=pct)
-    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-slope]`).forEach(inp=>{
-      const id = parseInt(inp.getAttribute('data-xs-id'),10);
-      const commit = (e)=>{
-        const store = getCrossStore(scope, side, staKey);
-        const r = (store.segs||[]).find(x=>x.id===id);
-        if (!r) return;
-        const t = String(e.target.value ?? "").trim();
-        if (t === "") { render(); return; }
-        const n = parseFloat(t.replace(/,/g,"."));
-        if (!Number.isFinite(n)) { render(); return; }
-        r.mode = 'pct';
-        r.slopePct = n;
-        saveState();
-        render();
-      };
-      inp.onchange = commit;
-      inp.onblur = commit;
-    });
+    // % slope input (when mode=pct) — keep typed text, update numeric on commit
+rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-slope]`).forEach(inp=>{
+  const id = parseInt(inp.getAttribute('data-xs-id'),10);
+
+  const setTextOnly = (v)=>{
+    const store = getCrossStore(scope, side, staKey);
+    const r = (store.segs||[]).find(x=>x.id===id);
+    if (!r) return;
+    r.slopeText = String(v ?? "");
+    // 文字列だけ保持（この段階ではrenderしない＝入力を消さない）
+    saveState();
+  };
+
+  const commit = (e)=>{
+    const store = getCrossStore(scope, side, staKey);
+    const r = (store.segs||[]).find(x=>x.id===id);
+    if (!r) return;
+    const t = String(e.target.value ?? "");
+    r.slopeText = t;
+
+    const tt = t.trim();
+    if (tt === "") { saveState(); render(); return; }
+
+    const n = parseFloat(tt.replace(/,/g,"."));
+    if (!Number.isFinite(n)) { saveState(); render(); return; }
+
+    r.mode = 'pct';
+    r.slopePct = n;
+    // 入力文字列はそのまま残す
+    saveState();
+    render();
+  };
+
+  inp.oninput  = (e)=> setTextOnly(e.target.value);
+  inp.onchange = commit;
+  inp.onblur   = commit;
+});
 
     
 
@@ -2445,40 +2471,66 @@ rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="
       selEl.onblur = commit;
     });
 
-    // step abs input
-    rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepabs]`).forEach(inp=>{
-      const id = parseInt(inp.getAttribute('data-xs-id'),10);
-      const commit = (e)=>{
-        const store = getCrossStore(scope, side, staKey);
-        const r = (store.segs||[]).find(x=>x.id===id);
-        if (!r) return;
-        const t = String(e.target.value ?? "").trim();
-        const abs = (t === "") ? 0 : parseFloat(t.replace(/,/g,"."));
-        if (!Number.isFinite(abs) || abs < 0) { render(); return; }
-        const dir = (r.stepDir === 'down') ? -1 : 1;
-        r.stepDz = dir * abs;
-        r.stepDir = (dir < 0) ? 'down' : 'up';
-        saveState();
-        render();
-      };
-      inp.onchange = commit;
-      inp.onblur = commit;
-    });
+    // step abs input — keep typed text, update numeric on commit
+rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepabs]`).forEach(inp=>{
+  const id = parseInt(inp.getAttribute('data-xs-id'),10);
+
+  const setTextOnly = (v)=>{
+    const store = getCrossStore(scope, side, staKey);
+    const r = (store.segs||[]).find(x=>x.id===id);
+    if (!r) return;
+    r.stepAbsText = String(v ?? "");
+    saveState();
+  };
+
+  const commit = (e)=>{
+    const store = getCrossStore(scope, side, staKey);
+    const r = (store.segs||[]).find(x=>x.id===id);
+    if (!r) return;
+
+    const t = String(e.target.value ?? "");
+    r.stepAbsText = t;
+
+    const tt = t.trim();
+    const abs = (tt === "") ? 0 : parseFloat(tt.replace(/,/g,"."));
+    if (!Number.isFinite(abs) || abs < 0) { saveState(); render(); return; }
+
+    const dir = (r.stepDir === 'down') ? -1 : 1;
+    r.stepDz = dir * abs;
+    // stepDirは保持
+    saveState();
+    render();
+  };
+
+  inp.oninput  = (e)=> setTextOnly(e.target.value);
+  inp.onchange = commit;
+  inp.onblur   = commit;
+});
 
     // step direction
-    rootEl.querySelectorAll(`select[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepdir]`).forEach(selEl=>{
-      const id = parseInt(selEl.getAttribute('data-xs-id'),10);
-      const commit = (e)=>{
-        const store = getCrossStore(scope, side, staKey);
-        const r = (store.segs||[]).find(x=>x.id===id);
-        if (!r) return;
-        const v = String(e.target.value||'up');
-        r.stepDir = (v === 'down') ? 'down' : 'up';
-        const abs = Math.abs(Number(r.stepDz)||0);
-        r.stepDz = (r.stepDir === 'down') ? -abs : abs;
-        saveState();
-        render();
-      };
+rootEl.querySelectorAll(`select[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepdir]`).forEach(selEl=>{
+  const id = parseInt(selEl.getAttribute('data-xs-id'),10);
+  const commit = (e)=>{
+    const store = getCrossStore(scope, side, staKey);
+    const r = (store.segs||[]).find(x=>x.id===id);
+    if (!r) return;
+    const v = String(e.target.value||'up');
+    r.stepDir = (v === 'down') ? 'down' : 'up';
+
+    // absは入力文字列を優先（なければ既存stepDzから）
+    let abs = Math.abs(Number(r.stepDz)||0);
+    const tt = String(r.stepAbsText ?? "").trim();
+    const n = tt === "" ? NaN : parseFloat(tt.replace(/,/g,"."));
+    if (Number.isFinite(n) && n >= 0) abs = n;
+
+    r.stepDz = (r.stepDir === 'down') ? -abs : abs;
+    saveState();
+    render();
+  };
+  selEl.onchange = commit;
+  selEl.onblur = commit;
+});
+
       selEl.onchange = commit;
       selEl.onblur = commit;
     });
@@ -4357,7 +4409,7 @@ bindExtraUI("profile", viewProfile, pitch);
           </td>
           <td>
             ${mode==='pct' ? `
-              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-slope type="number" step="0.001" value="${slopePctRaw.toFixed(3)}" />
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-slope type="text" inputmode="decimal" value="${xmlEscape(((r && typeof r.slopeText==='string')?r.slopeText:slopePctRaw.toFixed(3)))}" />
               <div class="mini">（+上がり / -下がり）</div>
               <div class="row" style="gap:6px; align-items:center; margin-top:6px;">
                 <span class="mini">割分</span>
@@ -4378,7 +4430,7 @@ bindExtraUI("profile", viewProfile, pitch);
           </td>
           <td>
             <div class="row" style="gap:6px; align-items:center;">
-              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepabs type="number" step="0.001" min="0" value="${stepAbs.toFixed(3)}" style="width:110px;" />
+              <input data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepabs type="text" inputmode="decimal" value="${xmlEscape(((r && typeof r.stepAbsText==='string')?r.stepAbsText:stepAbs.toFixed(3)))}" style="width:110px;" />
               <select data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-id="${r.id}" data-xs-stepdir>
                 <option value="up" ${stepDir==='up'?'selected':''}>上</option>
                 <option value="down" ${stepDir==='down'?'selected':''}>下</option>
