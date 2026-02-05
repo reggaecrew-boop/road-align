@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_9_0");
+      navigator.serviceWorker.register("./sw.js?v=18_9_2");
     }
   </script>
 
@@ -100,7 +100,7 @@
 <div class="wrap">
   <div class="header" id="topHeader">
     <div class="title">
-      道路線形計算（iPadオフラインPWA） <span class="badge" id="appVerBadge">v18.9.1</span>
+      道路線形計算（iPadオフラインPWA） <span class="badge" id="appVerBadge">v18.9.2</span>
       <span class="badge">同一ページ：平面 → 縦断 → 出力 → 保存 / 自動保存（localStorage）</span>
       <button id="btnHeaderToggle" class="btn btn-ghost headerToggle" type="button" aria-label="ヘッダ表示切替">▲</button>
     </div>
@@ -2164,26 +2164,33 @@ const renderCrossElemListHtml = (sideKey)=>{
 const enableElemDrag = (sideKey)=>{
   const list = document.getElementById('xsElemList_'+sideKey);
   if (!list) return;
-  const handleSelector = '.xsDrag';
-  let dragging = null; // {id, startY}
+
+  let dragging = null; // { itemId, pointerId }
+
   const onPointerDown = (ev)=>{
-    const h = ev.target.closest(handleSelector);
-    if (!h) return;
-    const row = ev.target.closest('.xsRow');
+    // Only start drag from the handle button itself
+    const handle = ev.target.closest('.xsDrag');
+    if (!handle) return;
+    const row = handle.closest('.xsRow');
     if (!row) return;
     const itemId = Number(row.dataset.id);
     if (!Number.isFinite(itemId)) return;
-    ev.preventDefault();
+
+    ev.preventDefault(); // prevent page scroll while dragging
+    ev.stopPropagation();
+
     row.setPointerCapture?.(ev.pointerId);
     dragging = { itemId, pointerId: ev.pointerId };
     row.classList.add('dragging');
   };
+
   const onPointerMove = (ev)=>{
     if (!dragging || ev.pointerId !== dragging.pointerId) return;
     const rows = Array.from(list.querySelectorAll('.xsRow'));
     const curIdx = rows.findIndex(r=>Number(r.dataset.id)===dragging.itemId);
     if (curIdx<0) return;
     const y = ev.clientY;
+
     // find nearest row center
     let tgtIdx = curIdx;
     let best = Infinity;
@@ -2193,30 +2200,34 @@ const enableElemDrag = (sideKey)=>{
       const d = Math.abs(cy - y);
       if (d < best){ best = d; tgtIdx = idx; }
     });
-    if (tgtIdx !== curIdx){
-      const arr = state.cross.elemCommon[sideKey].items;
-      const from = arr.findIndex(it=>Number(it.id)===dragging.itemId);
-      if (from>=0){
-        const [it] = arr.splice(from,1);
-        arr.splice(tgtIdx,0,it);
-        syncCrossCommonSegsFromElems();
-        saveState();
-        render();
-      }
-    }
+    if (tgtIdx === curIdx) return;
+
+    const side = sideKey;
+    const { arr, idx } = findElem(side, dragging.itemId);
+    if (idx<0) return;
+    const it = arr.splice(idx,1)[0];
+    arr.splice(tgtIdx,0,it);
+
+    syncCrossCommonSegsFromElems();
+    saveState();
+    render(); // rebind handlers including drag
   };
+
   const onPointerUp = (ev)=>{
     if (!dragging || ev.pointerId !== dragging.pointerId) return;
-    const row = list.querySelector('.xsRow.dragging');
-    if (row) row.classList.remove('dragging');
+    const row = list.querySelector('.xsRow[data-id="'+dragging.itemId+'"]');
+    row?.classList.remove('dragging');
     dragging = null;
   };
-  list.addEventListener('pointerdown', onPointerDown);
-  list.addEventListener('pointermove', onPointerMove);
-  list.addEventListener('pointerup', onPointerUp);
-  list.addEventListener('pointercancel', onPointerUp);
-};
 
+  // Bind to handles only (avoid blocking input/select interactions)
+  list.querySelectorAll('.xsDrag').forEach(btn=>{
+    btn.addEventListener('pointerdown', onPointerDown, { passive:false });
+  });
+  list.addEventListener('pointermove', onPointerMove, { passive:true });
+  list.addEventListener('pointerup', onPointerUp, { passive:true });
+  list.addEventListener('pointercancel', onPointerUp, { passive:true });
+};
 
 const cloneCrossSide = (src)=>{
   const segs = (src?.segs || []).map((r, i)=>({
