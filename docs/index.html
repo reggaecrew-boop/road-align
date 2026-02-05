@@ -1845,7 +1845,18 @@ const ensureCrossState = ()=>{
     obj.segs = obj.segs.map((r, idx)=>({
       id: (r && Number.isFinite(r.id)) ? r.id : (idx + 1),
       end: Number(r && r.end),
+      // mode: 'pct' or 'ratio'
+      mode: (r && (r.mode === 'pct' || r.mode === 'ratio')) ? r.mode : 'pct',
+      // slope (%)
       slopePct: Number.isFinite(Number(r && r.slopePct)) ? Number(r.slopePct) : 0,
+      // 1:X inputs (kept even in pct mode for later switching)
+      ratioX: Number.isFinite(Number(r && r.ratioX)) ? Number(r.ratioX) : 20,
+      ratioDir: (r && (r.ratioDir === 'up' || r.ratioDir === 'down')) ? r.ratioDir : ((Number(r && r.slopePct)||0) >= 0 ? 'up' : 'down'),
+      // waribun raw text (keep after conversion)
+      wb: (r && typeof r.wb === 'string') ? r.wb : '',
+      // step (signed) and direction (keep direction even when stepDz==0)
+      stepDz: Number.isFinite(Number(r && r.stepDz)) ? Number(r.stepDz) : 0,
+      stepDir: (r && (r.stepDir === 'up' || r.stepDir === 'down')) ? r.stepDir : (((Number(r && r.stepDz)||0) < 0) ? 'down' : 'up'),
     }));
     if (!Number.isFinite(obj.nextSegId)) {
       const mx = Math.max(0, ...obj.segs.map(r=>r.id||0));
@@ -2359,7 +2370,6 @@ const bindCrossSlopeUI = (rootEl)=>{
         if (!Number.isFinite(n)) { render(); return; }
         r.mode = 'pct';
         r.slopePct = n;
-        r.wb = "";
         saveState();
         render();
       };
@@ -2436,37 +2446,23 @@ rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="
     });
 
     // step abs input
-    // iOS などで「段差の数値入力 → 方向選択」を続けて行うと、onchange/blur が発火する前に再描画されて
-    // 値が 0.000 に戻ることがあるため、oninput で state に先に反映しておく
     rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="${side}"][data-xs-stepabs]`).forEach(inp=>{
       const id = parseInt(inp.getAttribute('data-xs-id'),10);
-      const apply = (raw, commit=false)=>{
+      const commit = (e)=>{
         const store = getCrossStore(scope, side, staKey);
         const r = (store.segs||[]).find(x=>x.id===id);
         if (!r) return;
-        const t = String(raw ?? "").trim();
-        if (t === "") {
-          // 空欄は 0 として扱う（ただし入力中は再描画しない）
-          r.stepDz = 0;
-          if (commit) { saveState(); render(); }
-          return;
-        }
-        const n = parseFloat(t.replace(/,/g,"."));
-        if (!Number.isFinite(n)) {
-          if (commit) render();
-          return;
-        }
-        // 基本は「方向(select)側の設定」を尊重するため、既存符号を維持
-        // ただしユーザーが負号を入れた場合は down と解釈
-        let dir = (r.stepDz != null && Number(r.stepDz) < 0) ? -1 : 1;
-        if (n < 0) dir = -1;
-        r.stepDz = dir * Math.abs(n);
-        if (commit) { saveState(); render(); }
+        const t = String(e.target.value ?? "").trim();
+        const abs = (t === "") ? 0 : parseFloat(t.replace(/,/g,"."));
+        if (!Number.isFinite(abs) || abs < 0) { render(); return; }
+        const dir = (r.stepDir === 'down') ? -1 : 1;
+        r.stepDz = dir * abs;
+        r.stepDir = (dir < 0) ? 'down' : 'up';
+        saveState();
+        render();
       };
-
-      inp.oninput  = (e)=> apply(e.target.value, false);
-      inp.onchange = (e)=> apply(e.target.value, true);
-      inp.onblur   = inp.onchange;
+      inp.onchange = commit;
+      inp.onblur = commit;
     });
 
     // step direction
@@ -2477,8 +2473,9 @@ rootEl.querySelectorAll(`input[data-xs-scope="${scope}"]${staSel}[data-xs-side="
         const r = (store.segs||[]).find(x=>x.id===id);
         if (!r) return;
         const v = String(e.target.value||'up');
+        r.stepDir = (v === 'down') ? 'down' : 'up';
         const abs = Math.abs(Number(r.stepDz)||0);
-        r.stepDz = (v === 'down') ? -abs : abs;
+        r.stepDz = (r.stepDir === 'down') ? -abs : abs;
         saveState();
         render();
       };
@@ -4333,7 +4330,7 @@ bindExtraUI("profile", viewProfile, pitch);
       const slopePct = crossRowSlopePct(r);
       const stepDz = crossRowStepDz(r);
       const stepAbs = Math.abs(Number(stepDz)||0);
-      const stepDir = (Number(stepDz)||0) >= 0 ? 'up' : 'down';
+      const stepDir = (Math.abs(Number(stepDz)||0) > 0) ? ((Number(stepDz) < 0) ? 'down' : 'up') : ((r && (r.stepDir === 'down' || r.stepDir === 'up')) ? r.stepDir : 'up');
       const wbText = (r && typeof r.wb === 'string') ? r.wb : '';
       const wbInfo = parseWaribun(wbText);
       let wbPreviewPct = null;
