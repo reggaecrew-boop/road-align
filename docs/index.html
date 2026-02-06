@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_9_3");
+      navigator.serviceWorker.register("./sw.js?v=18_9_4");
     }
   </script>
 
@@ -4844,6 +4844,11 @@ const cr = computeCrossSide("common", "right");
           <label>操作</label>
           <button class="btn" id="xsOverrideAddOrSelect">＋ 作成/選択</button>
           <div style="height:10px;"></div>
+
+          <button class="btn btn-ok" id="xsSetEndToTotal">終点=平面総延長（例外を作成/選択）</button>
+          <div class="mini" style="margin-top:6px;">横断の終点測点を平面総延長に合わせます</div>
+          <div style="height:10px;"></div>
+
           <button class="btn btn-ghost" id="xsOverrideDelete" ${hasSel?"":"disabled"}>例外を削除（共通に戻す）</button>
         </div>
       </div>
@@ -4914,7 +4919,19 @@ const cr = computeCrossSide("common", "right");
           <input id="xsPreviewSta" type="text" placeholder="例：110.000 / 1+10.000" value="${(state.cross.ui.previewTok||"")}" />
           <div class="mini">pitch=${pitch}m</div>
         </div>
+
         <div style="width:220px;">
+          <label>基準（プレビュー表示）</label>
+          <select id="xsBaseSel">
+            <option value="CL">中心線（CL）</option>
+          </select>
+          <label class="mini" style="margin-top:6px;"><input id="xsShowLabels" type="checkbox" checked /> ラベル表示</label>
+        </div>
+        <div style="width:220px;">
+          <label>出力</label>
+          <button class="btn btn-ghost" id="xsExportCsv">断面点列CSV</button>
+        </div>
+<div style="width:220px;">
           <label>操作</label>
           <button class="btn" id="xsPreviewShow">表示</button>
           <div style="height:10px;"></div>
@@ -5366,12 +5383,66 @@ const cr = computeCrossSide("common", "right");
 
     const poly = [...ptsL.slice(1).reverse(), {x:0,z:0}, ...ptsR.slice(1)];
 
-    const labels = [
-      { x: -lCalc.lastEnd, z: lCalc.lastZ, text: `L=${lCalc.lastEnd.toFixed(3)}m` },
-      { x:  rCalc.lastEnd, z: rCalc.lastZ, text: `R=${rCalc.lastEnd.toFixed(3)}m` },
-    ];
+    // --- landmarks for base switching (Phase2) ---
+    const landmarks = [];
+    landmarks.push({ key:'CL', label:'中心線（CL）', x:0, z:0 });
+    // steps (right)
+    let stepIdxR=0;
+    for (const row of rCalc.rows) {
+      if (Number.isFinite(row.stepDz) && Math.abs(row.stepDz) > 1e-12) {
+        stepIdxR++;
+        const x = row.end;
+        const zBefore = row.zEnd - row.stepDz;
+        const zAfter  = row.zEnd;
+        const zUp = Math.max(zBefore, zAfter);
+        const zDown = Math.min(zBefore, zAfter);
+        landmarks.push({ key:`R_STEP_UP_${stepIdxR}`, label:`右 段差上 #${stepIdxR}`, x, z:zUp });
+        landmarks.push({ key:`R_STEP_DN_${stepIdxR}`, label:`右 段差下 #${stepIdxR}`, x, z:zDown });
+      }
+    }
+    // steps (left)
+    let stepIdxL=0;
+    for (const row of lCalc.rows) {
+      if (Number.isFinite(row.stepDz) && Math.abs(row.stepDz) > 1e-12) {
+        stepIdxL++;
+        const x = -row.end;
+        const zBefore = row.zEnd - row.stepDz;
+        const zAfter  = row.zEnd;
+        const zUp = Math.max(zBefore, zAfter);
+        const zDown = Math.min(zBefore, zAfter);
+        landmarks.push({ key:`L_STEP_UP_${stepIdxL}`, label:`左 段差上 #${stepIdxL}`, x, z:zUp });
+        landmarks.push({ key:`L_STEP_DN_${stepIdxL}`, label:`左 段差下 #${stepIdxL}`, x, z:zDown });
+      }
+    }
+    // ends
+    landmarks.push({ key:'R_END', label:'右端', x: rCalc.lastEnd, z: rCalc.lastZ });
+    landmarks.push({ key:'L_END', label:'左端', x: -lCalc.lastEnd, z: lCalc.lastZ });
 
-    drawCrossPreviewCanvas(canvas, poly, labels);
+    // populate base selector
+    const baseSelEl = document.getElementById('xsBaseSel');
+    if (baseSelEl) {
+      const cur = String(state.cross.ui.previewBaseKey || 'CL');
+      baseSelEl.innerHTML = landmarks.map(l=>`<option value="${l.key}" ${l.key===cur?'selected':''}>${l.label}</option>`).join('');
+      if (!landmarks.some(l=>l.key===cur)) state.cross.ui.previewBaseKey = 'CL';
+    }
+
+    // apply base translation
+    const baseKey = String(state.cross.ui.previewBaseKey || 'CL');
+    const ref = landmarks.find(l=>l.key===baseKey) || landmarks[0];
+    const polyShift = poly.map(p=>({ x: p.x - ref.x, z: p.z - ref.z }));
+
+
+    const showLabels = (document.getElementById('xsShowLabels')?.checked ?? true);
+    const labels = showLabels ? [
+      { x: (-lCalc.lastEnd) - ref.x, z: lCalc.lastZ - ref.z, text: `左端 L=${lCalc.lastEnd.toFixed(3)}m` },
+      { x: ( rCalc.lastEnd) - ref.x, z: rCalc.lastZ - ref.z, text: `右端 R=${rCalc.lastEnd.toFixed(3)}m` },
+      ...landmarks.filter(l=>l.key.startsWith('R_STEP_UP_') || l.key.startsWith('L_STEP_UP_')).map(l=>({ x:l.x - ref.x, z:l.z - ref.z, text:l.label })),
+    ] : [];
+
+
+    drawCrossPreviewCanvas(canvas, polyShift, labels);
+    // cache for CSV export
+    state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX: ref.x, baseZ: ref.z, pts: polyShift, landmarks };
 
     if (infoEl) {
       const sLabel = metersToStaPitch(m, pitchNow, 3);
@@ -5411,6 +5482,49 @@ const cr = computeCrossSide("common", "right");
       if (!k) return;
       if (inpPrev) inpPrev.value = k;
       runPrev();
+    };
+  }
+
+
+  // base/labels/export (Phase2)
+  const baseSel = document.getElementById('xsBaseSel');
+  if (baseSel) {
+    baseSel.onchange = ()=>{ ensureCrossState(); state.cross.ui.previewBaseKey = baseSel.value; saveState(); drawPreview(state.cross.ui.previewTok||'0.000'); };
+  }
+  const chkLbl = document.getElementById('xsShowLabels');
+  if (chkLbl) {
+    chkLbl.onchange = ()=>{ drawPreview(state.cross.ui.previewTok||'0.000'); };
+  }
+  const btnCsv = document.getElementById('xsExportCsv');
+  if (btnCsv) {
+    btnCsv.onclick = ()=>{
+      ensureCrossState();
+      const c = state.cross.ui.previewCache;
+      if (!c || !Array.isArray(c.pts)) { alert('先にプレビューを表示してください'); return; }
+      const lines = [];
+      lines.push(['sta_m','base','base_x','base_z','x','z'].join(','));
+      for (const p of c.pts) {
+        lines.push([Number(c.m).toFixed(3), c.baseLabel, Number(c.baseX).toFixed(3), Number(c.baseZ).toFixed(3), Number(p.x).toFixed(3), Number(p.z).toFixed(3)].join(','));
+      }
+      const csv = lines.join('\n');
+      const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `xs_poly_${Number(c.m).toFixed(3)}m.csv`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    };
+  }
+
+  const btnSetEnd = document.getElementById('xsSetEndToTotal');
+  if (btnSetEnd) {
+    btnSetEnd.onclick = ()=>{
+      const total = Number(res.total||0);
+      const inp = document.getElementById('xsOverrideSta');
+      if (inp) inp.value = total.toFixed(3);
+      const btn = document.getElementById('xsOverrideAddOrSelect');
+      if (btn) btn.click();
     };
   }
 
