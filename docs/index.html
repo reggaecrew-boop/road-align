@@ -10,9 +10,9 @@
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      const APP_VERSION = "18.9.6";
+      const APP_VERSION = "18.9.7";
       window.APP_VERSION = APP_VERSION;
-      navigator.serviceWorker.register(`./sw.js?v=${APP_VERSION.replace(/\./g, "_")}`);
+      try{ if("serviceWorker" in navigator){ navigator.serviceWorker.register(`./sw.js?v=${APP_VERSION.replace(/\./g,"_")}`).catch(()=>{}); } }catch(e){}
     }
   </script>
 
@@ -191,7 +191,8 @@ const LS_KEY = LS_KEY_NEW;
 const UI_KEY = "road_align_pwa_ui_v1";
 let uiState = { headerCollapsed: false, coordSearch: "" };
 try {
-  const raw = localStorage.getItem(UI_KEY);
+  let raw = null;
+  try { raw = localStorage.getItem(UI_KEY); } catch(e) { raw = null; }
   if (raw) uiState = Object.assign(uiState, JSON.parse(raw));
 } catch (e) {}
 function applyHeaderCollapsed(){
@@ -1021,8 +1022,10 @@ function applyPlanImport(result, mode, msgText){
 }
 
 function loadState() {
-  const tNew = localStorage.getItem(LS_KEY_NEW);
-  const tOld = localStorage.getItem(LS_KEY_OLD);
+  let tNew = null;
+  try { tNew = localStorage.getItem(LS_KEY_NEW); } catch(e) { tNew = null; }
+  let tOld = null;
+  try { tOld = localStorage.getItem(LS_KEY_OLD); } catch(e) { tOld = null; }
   const t = tNew || tOld;
   if (!t) return;
   try {
