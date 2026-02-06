@@ -9,11 +9,21 @@
   <link rel="manifest" href="./manifest.json">
   <meta name="theme-color" content="#2563eb">
   <script>
-    if ("serviceWorker" in navigator) {
-      const APP_VERSION = "18.9.7";
-      window.APP_VERSION = APP_VERSION;
-      try{ if("serviceWorker" in navigator){ navigator.serviceWorker.register(`./sw.js?v=${APP_VERSION.replace(/\./g,"_")}`).catch(()=>{}); } }catch(e){}
-    }
+    // Version is single-source-of-truth.
+    // Keep this block extremely defensive for iOS Safari.
+    window.APP_VERSION = "18.9.8";
+    // Defer SW registration to after DOM is ready (and never hard-fail).
+    window.__TRY_REGISTER_SW__ = function(){
+      try {
+        if (!('serviceWorker' in navigator)) return;
+        var v = String(window.APP_VERSION || '');
+        var q = v.replace(/\./g, '_');
+        var p = navigator.serviceWorker.register('./sw.js?v=' + q);
+        if (p && p.catch) p.catch(function(){});
+      } catch (e) {
+        // ignore
+      }
+    };
   </script>
 
   <style>
@@ -158,6 +168,27 @@
 
 <script>
 
+// --- early boot: version badge + SW (defensive) ---
+(function(){
+  try {
+    var onReady = function(){
+      try {
+        var v = String(window.APP_VERSION || '');
+        var b = document.getElementById('appVerBadge');
+        if (b) b.textContent = v ? ('v' + v) : 'v--';
+      } catch(e){}
+      try {
+        if (window.__TRY_REGISTER_SW__) window.__TRY_REGISTER_SW__();
+      } catch(e){}
+    };
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      setTimeout(onReady, 0);
+    } else {
+      document.addEventListener('DOMContentLoaded', onReady);
+    }
+  } catch (e) {}
+})();
+
 // --- diagnostics (v18.8.3) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
@@ -191,8 +222,7 @@ const LS_KEY = LS_KEY_NEW;
 const UI_KEY = "road_align_pwa_ui_v1";
 let uiState = { headerCollapsed: false, coordSearch: "" };
 try {
-  let raw = null;
-  try { raw = localStorage.getItem(UI_KEY); } catch(e) { raw = null; }
+  const raw = localStorage.getItem(UI_KEY);
   if (raw) uiState = Object.assign(uiState, JSON.parse(raw));
 } catch (e) {}
 function applyHeaderCollapsed(){
@@ -1022,10 +1052,8 @@ function applyPlanImport(result, mode, msgText){
 }
 
 function loadState() {
-  let tNew = null;
-  try { tNew = localStorage.getItem(LS_KEY_NEW); } catch(e) { tNew = null; }
-  let tOld = null;
-  try { tOld = localStorage.getItem(LS_KEY_OLD); } catch(e) { tOld = null; }
+  const tNew = localStorage.getItem(LS_KEY_NEW);
+  const tOld = localStorage.getItem(LS_KEY_OLD);
   const t = tNew || tOld;
   if (!t) return;
   try {
