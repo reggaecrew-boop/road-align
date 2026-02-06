@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_9_2");
+      navigator.serviceWorker.register("./sw.js?v=18_9_3");
     }
   </script>
 
@@ -100,7 +100,7 @@
 <div class="wrap">
   <div class="header" id="topHeader">
     <div class="title">
-      道路線形計算（iPadオフラインPWA） <span class="badge" id="appVerBadge">v18.9.2</span>
+      道路線形計算（iPadオフラインPWA） <span class="badge" id="appVerBadge">v18.9.3</span>
       <span class="badge">同一ページ：平面 → 縦断 → 出力 → 保存 / 自動保存（localStorage）</span>
       <button id="btnHeaderToggle" class="btn btn-ghost headerToggle" type="button" aria-label="ヘッダ表示切替">▲</button>
     </div>
@@ -2134,7 +2134,7 @@ const renderCrossElemListHtml = (sideKey)=>{
     return `
       <div class="xsRow" data-id="${id}" ${selClass}>
         <div style="display:flex; gap:10px; align-items:flex-start;">
-          <button class="btn btn-ghost xsDrag" type="button" style="width:auto; padding:6px 10px;">≡</button>
+          <div class="xsDragIcon" aria-hidden="true" style="width:34px; text-align:center; padding:6px 10px; color:var(--muted); border:1px solid var(--line); border-radius:10px; background:#fff;">≡</div>
           <div style="flex:1;">
             <div style="display:flex; gap:8px; align-items:end; flex-wrap:wrap;">
               <div style="width:160px;">
@@ -2160,74 +2160,8 @@ const renderCrossElemListHtml = (sideKey)=>{
   return items.map(rowHtml).join('') || `<div class="mini" style="padding:8px;">（まだエレメントがありません。下の＋ボタンで追加）</div>`;
 };
 
-// Drag reorder (pointer-based)
-const enableElemDrag = (sideKey)=>{
-  const list = document.getElementById('xsElemList_'+sideKey);
-  if (!list) return;
-
-  let dragging = null; // { itemId, pointerId }
-
-  const onPointerDown = (ev)=>{
-    // Only start drag from the handle button itself
-    const handle = ev.target.closest('.xsDrag');
-    if (!handle) return;
-    const row = handle.closest('.xsRow');
-    if (!row) return;
-    const itemId = Number(row.dataset.id);
-    if (!Number.isFinite(itemId)) return;
-
-    ev.preventDefault(); // prevent page scroll while dragging
-    ev.stopPropagation();
-
-    row.setPointerCapture?.(ev.pointerId);
-    dragging = { itemId, pointerId: ev.pointerId };
-    row.classList.add('dragging');
-  };
-
-  const onPointerMove = (ev)=>{
-    if (!dragging || ev.pointerId !== dragging.pointerId) return;
-    const rows = Array.from(list.querySelectorAll('.xsRow'));
-    const curIdx = rows.findIndex(r=>Number(r.dataset.id)===dragging.itemId);
-    if (curIdx<0) return;
-    const y = ev.clientY;
-
-    // find nearest row center
-    let tgtIdx = curIdx;
-    let best = Infinity;
-    rows.forEach((r, idx)=>{
-      const b = r.getBoundingClientRect();
-      const cy = (b.top+b.bottom)/2;
-      const d = Math.abs(cy - y);
-      if (d < best){ best = d; tgtIdx = idx; }
-    });
-    if (tgtIdx === curIdx) return;
-
-    const side = sideKey;
-    const { arr, idx } = findElem(side, dragging.itemId);
-    if (idx<0) return;
-    const it = arr.splice(idx,1)[0];
-    arr.splice(tgtIdx,0,it);
-
-    syncCrossCommonSegsFromElems();
-    saveState();
-    render(); // rebind handlers including drag
-  };
-
-  const onPointerUp = (ev)=>{
-    if (!dragging || ev.pointerId !== dragging.pointerId) return;
-    const row = list.querySelector('.xsRow[data-id="'+dragging.itemId+'"]');
-    row?.classList.remove('dragging');
-    dragging = null;
-  };
-
-  // Bind to handles only (avoid blocking input/select interactions)
-  list.querySelectorAll('.xsDrag').forEach(btn=>{
-    btn.addEventListener('pointerdown', onPointerDown, { passive:false });
-  });
-  list.addEventListener('pointermove', onPointerMove, { passive:true });
-  list.addEventListener('pointerup', onPointerUp, { passive:true });
-  list.addEventListener('pointercancel', onPointerUp, { passive:true });
-};
+// Drag reorder (disabled on iPhone/iPad Safari for input stability)
+const enableElemDrag = (sideKey)=>{ /* no-op */ };
 
 const cloneCrossSide = (src)=>{
   const segs = (src?.segs || []).map((r, i)=>({
@@ -4832,7 +4766,7 @@ const cr = computeCrossSide("common", "right");
       <div class="grid grid-2" style="margin-top:10px;">
         <div>
           <div class="pill">右側（+）エレメント（共通）</div>
-          <div class="mini">≡を長押し→ドラッグで順序変更。行をタップで選択</div>
+          <div class="mini">行をタップで選択（iPhone互換のため並べ替えは一旦停止）</div>
           <div id="xsElemList_right" class="xsElemList">
             ${renderCrossElemListHtml("right")}
           </div>
@@ -4845,7 +4779,7 @@ const cr = computeCrossSide("common", "right");
         </div>
         <div>
           <div class="pill">左側（-）エレメント（共通）</div>
-          <div class="mini">≡を長押し→ドラッグで順序変更。行をタップで選択</div>
+          <div class="mini">行をタップで選択（iPhone互換のため並べ替えは一旦停止）</div>
           <div id="xsElemList_left" class="xsElemList">
             ${renderCrossElemListHtml("left")}
           </div>
@@ -5082,6 +5016,8 @@ const cr = computeCrossSide("common", "right");
 
     // selection
     list.onclick = (ev)=>{
+      // do not steal focus from form controls
+      if (ev.target && ev.target.closest && ev.target.closest("input,select,textarea,button")) return;
       const row = ev.target.closest('.xsRow');
       if (!row) return;
       const id = Number(row.dataset.id);
