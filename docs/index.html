@@ -10,7 +10,9 @@
   <meta name="theme-color" content="#2563eb">
   <script>
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js?v=18_9_4");
+      const APP_VERSION = "18.9.6";
+      window.APP_VERSION = APP_VERSION;
+      navigator.serviceWorker.register(`./sw.js?v=${APP_VERSION.replace(/\./g, "_")}`);
     }
   </script>
 
@@ -93,14 +95,17 @@
     .xsRow{ margin:6px 0; border:1px solid var(--line); border-radius:12px; }
     .xsRow.dragging{ opacity:.6; }
 
-  </style>
+  
+  .xsPick { background: #fef3c7; }
+  tr[data-xs-pick] { cursor: pointer; }
+</style>
 </head>
 
 <body>
 <div class="wrap">
   <div class="header" id="topHeader">
     <div class="title">
-      道路線形計算（iPadオフラインPWA） <span class="badge" id="appVerBadge">v18.9.3</span>
+      道路線形計算（iPadオフラインPWA） <span class="badge" id="appVerBadge">v--</span>
       <span class="badge">同一ページ：平面 → 縦断 → 出力 → 保存 / 自動保存（localStorage）</span>
       <button id="btnHeaderToggle" class="btn btn-ghost headerToggle" type="button" aria-label="ヘッダ表示切替">▲</button>
     </div>
@@ -492,6 +497,11 @@ if (typeof s.profileShowVC !== "boolean") s.profileShowVC = true;
 
 
 
+
+  // --- plan overlay (cross on plan) ---
+  s.planOverlay = Object.assign({ showCross:false, crossMode:'selected' }, s.planOverlay || {});
+  if (typeof s.planOverlay.showCross !== 'boolean') s.planOverlay.showCross = !!s.planOverlay.showCross;
+  if (typeof s.planOverlay.crossMode !== 'string') s.planOverlay.crossMode = 'selected';
 
   return s;
 }
@@ -1149,6 +1159,7 @@ const normNameAscii = (s, maxLen=32) => {
   // replace anything except [A-Za-z0-9_ . + -] with _
   s = s.replace(/[^\w\.\+\-]/g, "_").replace(/_+/g, "_");
   if (s.length > maxLen) s = s.slice(0, maxLen);
+
   return s;
 };
 
@@ -1170,6 +1181,7 @@ const normNumStr = (v) => {
   //  - if only ',' exists => treat as decimal separator and convert to '.'
   if (s.includes(".") && s.includes(",")) s = s.replace(/,/g, "");
   else if (s.includes(",") && !s.includes(".")) s = s.replace(/,/g, ".");
+
   return s;
 };
 
@@ -1996,19 +2008,19 @@ const elemsToSegs = (items, sideKey, widthLimit)=>{
   const clampEnd = (e)=> (Number.isFinite(widthLimit) && widthLimit>0 ? Math.min(e, widthLimit) : e);
 
   // helper to push a span segment
-  const pushSpan = (L, slopePct)=>{
+  const pushSpan = (L, slopePct, src)=>{
     const nL = Number(L);
     if (!Number.isFinite(nL) || nL <= 0) return;
     const newEnd = clampEnd(end + nL);
     if (newEnd <= end + 1e-12) return;
-    segs.push({ id: id++, end: newEnd, mode:'pct', slopePct: Number(slopePct)||0, wb:'', ratioX:20, ratioDir: ((Number(slopePct)||0)>=0?'up':'down'), stepDir:'up', stepAbsText:'0.000', stepDz:0 });
+    segs.push({ id: id++, end: newEnd, mode:'pct', slopePct: Number(slopePct)||0, src: src||'SPAN', wb:'', ratioX:20, ratioDir: ((Number(slopePct)||0)>=0?'up':'down'), stepDir:'up', stepAbsText:'0.000', stepDz:0 });
     end = newEnd;
   };
   const pushStep = (dz, dir)=>{
     const n = Number(dz);
     if (!Number.isFinite(n) || n===0) return;
     const signed = (dir==='down') ? -Math.abs(n) : Math.abs(n);
-    segs.push({ id: id++, end: clampEnd(end), mode:'pct', slopePct: (segs.length?segs[segs.length-1].slopePct:0), wb:'', ratioX:20, ratioDir: ((segs.length?segs[segs.length-1].slopePct:0)>=0?'up':'down'),
+    segs.push({ id: id++, end: clampEnd(end), mode:'pct', slopePct: (segs.length?segs[segs.length-1].slopePct:0), src:'STEP', wb:'', ratioX:20, ratioDir: ((segs.length?segs[segs.length-1].slopePct:0)>=0?'up':'down'),
       stepDir: (dir==='down'?'down':'up'), stepAbsText: Math.abs(n).toFixed(3), stepDz: signed });
   };
 
@@ -2019,7 +2031,7 @@ const elemsToSegs = (items, sideKey, widthLimit)=>{
 
     if (it.type==='PAV' || it.type==='FLAT'){
       const pct = (it.type==='FLAT') ? 0 : (parseNumSafe(it.pctText) ?? 0);
-      pushSpan(parseNumSafe(it.L) ?? 0, pct);
+      pushSpan(parseNumSafe(it.L) ?? 0, pct, (it.type==='FLAT')?'PAV':'PAV');
       continue;
     }
     if (it.type==='STEP'){
@@ -2035,7 +2047,7 @@ const elemsToSegs = (items, sideKey, widthLimit)=>{
       if (x>0 && H>0){
         const pctAbs = slopePctFromRatioX(x);
         const pct = (dir==='down') ? -pctAbs : pctAbs;
-        pushSpan(H*x, pct);
+        pushSpan(H*x, pct, 'SLOPE');
       }
       continue;
     }
@@ -2053,7 +2065,7 @@ const elemsToSegs = (items, sideKey, widthLimit)=>{
     if (x>0){
       const pctAbs = slopePctFromRatioX(x);
       const pct = (dir==='down') ? -pctAbs : pctAbs;
-      pushSpan(widthLimit - end, pct);
+      pushSpan(widthLimit - end, pct, 'SLOPE');
     }
   } else {
     // If no explicit EXT, optionally extend with last slope? (Phase1: do not)
@@ -2287,7 +2299,7 @@ const computeCrossSide = (scope, side, staKey)=>{
     z += dzSlope;
     if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) z += stepDz;
 
-    rows.push({ id: r.id, start, end, mode: (r&&r.mode)||'pct', slopePct, ratioX: r?.ratioX, ratioDir: r?.ratioDir, stepDz, span, dzSlope, zEnd: z });
+    rows.push({ id: r.id, start, end, mode: (r&&r.mode)||'pct', slopePct, ratioX: r?.ratioX, ratioDir: r?.ratioDir, stepDz, span, dzSlope, zEnd: z, src: r?.src });
     start = end;
   }
   return { rows, lastEnd: start, lastZ: z, warnings };
@@ -2317,7 +2329,7 @@ const computeCrossRowsFromSegs = (segs)=>{
     const dzSlope = (slopePct/100.0) * span;
     z += dzSlope;
     if (Number.isFinite(stepDz) && Math.abs(stepDz) > 0) z += stepDz;
-    rows.push({ start, end, slopePct, stepDz, dzSlope, zEnd: z });
+    rows.push({ start, end, slopePct, stepDz, dzSlope, zEnd: z, src: r?.src });
     start = end;
   }
   return { rows, lastEnd: start, lastZ: z, warnings };
@@ -2481,7 +2493,7 @@ const setOverrideWidthFromCommon = (staKey, rightW, leftW)=>{
   }
 };
 
-const drawCrossPreviewCanvas = (canvas, pts, labels)=>{
+const drawCrossPreviewCanvas = (canvas, pts, labels, marks)=>{
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
@@ -2536,6 +2548,46 @@ const drawCrossPreviewCanvas = (canvas, pts, labels)=>{
     ctx.beginPath();
     ctx.arc(X,Y,3,0,Math.PI*2);
     ctx.fill();
+  }
+
+  // highlight marks
+  if (marks && marks.length) {
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 2;
+    for (const m of marks) {
+      const X = tx(m.x), Y = ty(m.z);
+      ctx.beginPath();
+      ctx.arc(X, Y, 6, 0, Math.PI*2);
+      ctx.stroke();
+    }
+  }
+
+
+  // highlighted marks
+  if (marks && marks.length) {
+    for (const m of marks) {
+      const X = tx(m.x), Y = ty(m.z);
+      ctx.beginPath();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = m.color || '#ef4444';
+      ctx.arc(X, Y, m.r || 7, 0, Math.PI*2);
+      ctx.stroke();
+    }
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = '#cbd5e1';
+  }
+
+
+  // marks (highlight)
+  if (marks && marks.length) {
+    for (const m of marks) {
+      const X = tx(m.x), Y = ty(m.z);
+      ctx.beginPath();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = m.color || '#ef4444';
+      ctx.arc(X,Y, m.r||6, 0, Math.PI*2);
+      ctx.stroke();
+    }
   }
 
   // labels (optional)
@@ -3270,7 +3322,9 @@ const buildUnifiedStationList = (total, stepInt, sources) => {
 /* =========================
    Canvas plot (left/right)
 ========================= */
+
 function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
+  const crossOv = options && options.crossOverlay ? options.crossOverlay : null;
   const ctx = canvas.getContext("2d");
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0,0,W,H);
@@ -3295,6 +3349,25 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
   for (const block of samples) for (const p of block.pts) pushPt(p.E, p.N);
   for (const p of workPoints) pushPt(p.E, p.N);
   if (options.showKeypoints) for (const k of keypoints) if (Number.isFinite(k.sta)) pushPt(k.E, k.N);
+
+  // include cross overlay in bbox
+  if (crossOv && crossOv.enabled && Number.isFinite(crossOv.sta)) {
+    try {
+      const p = evalAlignment(segments, crossOv.sta);
+      const th = p.az;
+      // right normal (right is +)
+      const nRx = Math.sin(th), nRy = -Math.cos(th);
+      const L = Math.max(0, Number(crossOv.Wleft||0));
+      const R = Math.max(0, Number(crossOv.Wright||0));
+      pushPt(p.E + (-L)*nRx, p.N + (-L)*nRy);
+      pushPt(p.E + ( R)*nRx, p.N + ( R)*nRy);
+      const pts = Array.isArray(crossOv.points) ? crossOv.points : [];
+      for (const q of pts) {
+        if (!q || !Number.isFinite(q.x)) continue;
+        pushPt(p.E + q.x*nRx, p.N + q.x*nRy);
+      }
+    } catch(e){}
+  }
 
   const pad = 30;
   const dx = Math.max(1e-9, maxE - minE);
@@ -3366,6 +3439,56 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
     }
   }
 
+  // Cross overlay (station + normal line + representative points)
+  if (crossOv && crossOv.enabled && Number.isFinite(crossOv.sta)) {
+    try {
+      const p = evalAlignment(segments, crossOv.sta);
+      const th = p.az;
+      const nRx = Math.sin(th), nRy = -Math.cos(th);
+      const L = Math.max(0, Number(crossOv.Wleft||0));
+      const R = Math.max(0, Number(crossOv.Wright||0));
+
+      const [cx, cy] = toXY(p.E, p.N);
+      const [xL, yL] = toXY(p.E + (-L)*nRx, p.N + (-L)*nRy);
+      const [xR, yR] = toXY(p.E + ( R)*nRx, p.N + ( R)*nRy);
+
+      // cross direction line
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#111827";
+      ctx.setLineDash([6,4]);
+      ctx.beginPath();
+      ctx.moveTo(xL,yL);
+      ctx.lineTo(xR,yR);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // station marker
+      ctx.fillStyle = "#111827";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI*2);
+      ctx.fill();
+
+      // representative points
+      const pts = Array.isArray(crossOv.points) ? crossOv.points : [];
+      for (const q of pts) {
+        if (!q || !Number.isFinite(q.x)) continue;
+        const QE = p.E + q.x*nRx;
+        const QN = p.N + q.x*nRy;
+        const [qx,qy] = toXY(QE,QN);
+        ctx.beginPath();
+        ctx.arc(qx, qy, q.isSelected ? 6 : 4, 0, Math.PI*2);
+        ctx.fillStyle = q.isSelected ? "#ef4444" : "#2563eb";
+        ctx.fill();
+      }
+
+      // label
+      ctx.font = "12px system-ui";
+      ctx.fillStyle = "#0f172a";
+      ctx.fillText(`STA ${crossOv.sta.toFixed(3)}m`, cx+8, cy-8);
+
+    } catch(e){}
+  }
+
   const lx=10, ly=10;
   ctx.fillStyle = "rgba(255,255,255,0.9)";
   ctx.strokeStyle = "#e2e8f0";
@@ -3394,6 +3517,7 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
     ctx.fillText(rows[i].label, lx+60, y+4);
   }
 }
+
 
 function drawProfileCanvas(canvas, model, total, options) {
   const ctx = canvas.getContext("2d");
@@ -3769,6 +3893,23 @@ const render = () => {
           </div>
         </div>
         <div class="mini">凡例：直線/曲線（左）/曲線（右）</div>
+      </div>
+
+      <div class="sep"></div>
+      <div class="grid grid-3">
+        <div>
+          <label>横断プロット</label>
+          <label class="mini"><input id="planShowCross" type="checkbox" /> 横断プロット表示（横断タブのプレビューに連動）</label>
+        </div>
+        <div>
+          <label>代表点の表示</label>
+          <select id="planCrossMode">
+            <option value="selected">選択中のみ</option>
+            <option value="all">全部</option>
+          </select>
+          <div class="mini">横断方向線は常に表示</div>
+        </div>
+        <div class="mini">測点位置＋横断方向線＋代表点を平面図へプロット（右が＋）</div>
       </div>
 
       <div class="canvasWrap" style="margin-top:10px;">
@@ -4193,11 +4334,44 @@ viewPlan.querySelectorAll("button[data-c-del]").forEach(btn=>{
   document.getElementById("showKeypoints").onchange = (e)=>{ state.showKeypoints = !!e.target.checked; saveState(); render(); };
   document.getElementById("showArrow").onchange = (e)=>{ state.showArrow = !!e.target.checked; saveState(); render(); };
 
+  // plan cross overlay controls
+  state.planOverlay = state.planOverlay || { showCross:false, crossMode:'selected' };
+  const chkPlanCross = document.getElementById('planShowCross');
+  const selPlanMode = document.getElementById('planCrossMode');
+  if (chkPlanCross) chkPlanCross.checked = !!state.planOverlay.showCross;
+  if (selPlanMode) selPlanMode.value = String(state.planOverlay.crossMode||'selected');
+  if (chkPlanCross) chkPlanCross.onchange = (e)=>{ state.planOverlay.showCross = !!e.target.checked; saveState(); render(); };
+  if (selPlanMode) selPlanMode.onchange = (e)=>{ state.planOverlay.crossMode = String(e.target.value||'selected'); saveState(); render(); };
+
   const canvas = document.getElementById("planCanvas");
+  const crossCache = state.cross && state.cross.ui ? state.cross.ui.previewCache : null;
+  const crossPickKey = String(state.cross?.ui?.previewPickKey||'');
+  let crossOv = { enabled:false };
+  if (state.planOverlay?.showCross && crossCache && Number.isFinite(crossCache.m)) {
+    const sta = crossCache.m;
+    const ptsAll = (crossCache.reps||[]).map(r=>({ key:r.key, label:r.label, x:r.x, isSelected: (r.key===crossPickKey) }));
+    let pts = [];
+    if (String(state.planOverlay.crossMode||'selected')==='all') {
+      pts = ptsAll;
+    } else {
+      const sel = ptsAll.find(p=>p.key===crossPickKey);
+      pts = sel ? [sel] : [];
+    }
+    // cross width from polyShift range
+    const poly = crossCache.pts || [];
+    let minX=0, maxX=0;
+    if (poly.length) {
+      minX = Math.min(...poly.map(p=>p.x));
+      maxX = Math.max(...poly.map(p=>p.x));
+    }
+    crossOv = { enabled:true, sta, Wleft: Math.max(0, -minX), Wright: Math.max(0, maxX), points: pts };
+  }
+
   drawPlanCanvas(canvas, res.segments, workPoints, res.keypoints, {
     plotStep: state.plotStep,
     showKeypoints: state.showKeypoints,
-    showArrow: state.showArrow
+    showArrow: state.showArrow,
+    crossOverlay: crossOv
   });
 
 
@@ -4927,9 +5101,11 @@ const cr = computeCrossSide("common", "right");
           </select>
           <label class="mini" style="margin-top:6px;"><input id="xsShowLabels" type="checkbox" checked /> ラベル表示</label>
         </div>
-        <div style="width:220px;">
+        <div style=\"width:220px;\">
           <label>出力</label>
-          <button class="btn btn-ghost" id="xsExportCsv">断面点列CSV</button>
+          <button class=\"btn btn-ghost\" id=\"xsExportCsv\">断面点列CSV</button>
+          <div style=\"height:8px;\"></div>
+          <button class=\"btn btn-ghost\" id=\"xsExportRepCsv\">代表点CSV</button>
         </div>
 <div style="width:220px;">
           <label>操作</label>
@@ -5414,6 +5590,126 @@ const cr = computeCrossSide("common", "right");
         landmarks.push({ key:`L_STEP_DN_${stepIdxL}`, label:`左 段差下 #${stepIdxL}`, x, z:zDown });
       }
     }
+
+    // slope shoulders/toes (from element-generated segs only: row.src==='SLOPE')
+    const addSlopeLandmarks = (rows, sign, prefix)=>{
+      let idx=0;
+      let prevZ=0;
+      for (let i=0;i<rows.length;i++){
+        const r = rows[i];
+        const isSlope = (r && r.src==='SLOPE');
+        const prev = (i>0?rows[i-1]:null);
+        const prevIsSlope = (prev && prev.src==='SLOPE');
+        const zStart = (i===0)?0:(prevZ);
+        // update prevZ after computing
+        const zEnd = r.zEnd;
+        if (isSlope && !prevIsSlope){
+          idx++;
+          landmarks.push({ key:`${prefix}_SLOPE_SH_${idx}`, label:`${prefix==='R'?'右':'左'} 法肩 #${idx}`, x: sign*r.start, z: zStart });
+        }
+        const next = (i+1<rows.length?rows[i+1]:null);
+        const nextIsSlope = (next && next.src==='SLOPE');
+        if (isSlope && !nextIsSlope){
+          landmarks.push({ key:`${prefix}_SLOPE_TOE_${idx}`, label:`${prefix==='R'?'右':'左'} 法尻 #${idx}`, x: sign*r.end, z: zEnd });
+        }
+        prevZ = zEnd;
+      }
+    };
+    addSlopeLandmarks(rCalc.rows, +1, 'R');
+    addSlopeLandmarks(lCalc.rows, -1, 'L');
+
+
+    // slopes (right/left) from elem-derived seg metadata (src='SLOPE')
+    let slopeIdxR = 0;
+    {
+      let zPrev = 0;
+      let prevIsSlope = false;
+      for (let i=0;i<rCalc.rows.length;i++) {
+        const row = rCalc.rows[i];
+        const isSlope = (row && row.src==='SLOPE');
+        const zStart = zPrev;
+        if (isSlope && !prevIsSlope) {
+          slopeIdxR++;
+          landmarks.push({ key:`R_SLOPE_SH_${slopeIdxR}`, label:`右 法肩 #${slopeIdxR}`, x: row.start, z: zStart });
+        }
+        const next = rCalc.rows[i+1];
+        const nextIsSlope = !!(next && next.src==='SLOPE');
+        if (isSlope && !nextIsSlope) {
+          landmarks.push({ key:`R_SLOPE_TOE_${slopeIdxR}`, label:`右 法尻 #${slopeIdxR}`, x: row.end, z: row.zEnd });
+        }
+        zPrev = row.zEnd;
+        prevIsSlope = isSlope;
+      }
+    }
+
+    let slopeIdxL = 0;
+    {
+      let zPrev = 0;
+      let prevIsSlope = false;
+      for (let i=0;i<lCalc.rows.length;i++) {
+        const row = lCalc.rows[i];
+        const isSlope = (row && row.src==='SLOPE');
+        const zStart = zPrev;
+        if (isSlope && !prevIsSlope) {
+          slopeIdxL++;
+          landmarks.push({ key:`L_SLOPE_SH_${slopeIdxL}`, label:`左 法肩 #${slopeIdxL}`, x: -row.start, z: zStart });
+        }
+        const next = lCalc.rows[i+1];
+        const nextIsSlope = !!(next && next.src==='SLOPE');
+        if (isSlope && !nextIsSlope) {
+          landmarks.push({ key:`L_SLOPE_TOE_${slopeIdxL}`, label:`左 法尻 #${slopeIdxL}`, x: -row.end, z: row.zEnd });
+        }
+        zPrev = row.zEnd;
+        prevIsSlope = isSlope;
+      }
+    }
+
+    // slopes (right)
+    let slopeIdxR = 0;
+    let zPrevR = 0;
+    let prevSrcR = '';
+    for (let i=0;i<rCalc.rows.length;i++) {
+      const row = rCalc.rows[i];
+      const src = String(row.src||'');
+      const isSlope = (src === 'SLOPE');
+      const wasSlope = (prevSrcR === 'SLOPE');
+      const zStart = zPrevR;
+      if (isSlope && !wasSlope) {
+        slopeIdxR++;
+        landmarks.push({ key:`R_SLOPE_SH_${slopeIdxR}`, label:`右 法面肩 #${slopeIdxR}`, x: row.start, z: zStart });
+      }
+      const next = rCalc.rows[i+1];
+      const nextIsSlope = (String(next?.src||'') === 'SLOPE');
+      if (isSlope && !nextIsSlope) {
+        landmarks.push({ key:`R_SLOPE_TOE_${slopeIdxR}`, label:`右 法面尻 #${slopeIdxR}`, x: row.end, z: row.zEnd });
+      }
+      zPrevR = row.zEnd;
+      prevSrcR = src;
+    }
+
+    // slopes (left)
+    let slopeIdxL = 0;
+    let zPrevL = 0;
+    let prevSrcL = '';
+    for (let i=0;i<lCalc.rows.length;i++) {
+      const row = lCalc.rows[i];
+      const src = String(row.src||'');
+      const isSlope = (src === 'SLOPE');
+      const wasSlope = (prevSrcL === 'SLOPE');
+      const zStart = zPrevL;
+      if (isSlope && !wasSlope) {
+        slopeIdxL++;
+        landmarks.push({ key:`L_SLOPE_SH_${slopeIdxL}`, label:`左 法面肩 #${slopeIdxL}`, x: -row.start, z: zStart });
+      }
+      const next = lCalc.rows[i+1];
+      const nextIsSlope = (String(next?.src||'') === 'SLOPE');
+      if (isSlope && !nextIsSlope) {
+        landmarks.push({ key:`L_SLOPE_TOE_${slopeIdxL}`, label:`左 法面尻 #${slopeIdxL}`, x: -row.end, z: row.zEnd });
+      }
+      zPrevL = row.zEnd;
+      prevSrcL = src;
+    }
+
     // ends
     landmarks.push({ key:'R_END', label:'右端', x: rCalc.lastEnd, z: rCalc.lastZ });
     landmarks.push({ key:'L_END', label:'左端', x: -lCalc.lastEnd, z: lCalc.lastZ });
@@ -5431,18 +5727,21 @@ const cr = computeCrossSide("common", "right");
     const ref = landmarks.find(l=>l.key===baseKey) || landmarks[0];
     const polyShift = poly.map(p=>({ x: p.x - ref.x, z: p.z - ref.z }));
 
-
     const showLabels = (document.getElementById('xsShowLabels')?.checked ?? true);
+    const pickKey = String(state.cross.ui.previewPickKey || '');
+    const pickLm = landmarks.find(l=>l.key===pickKey);
+
     const labels = showLabels ? [
       { x: (-lCalc.lastEnd) - ref.x, z: lCalc.lastZ - ref.z, text: `左端 L=${lCalc.lastEnd.toFixed(3)}m` },
       { x: ( rCalc.lastEnd) - ref.x, z: rCalc.lastZ - ref.z, text: `右端 R=${rCalc.lastEnd.toFixed(3)}m` },
-      ...landmarks.filter(l=>l.key.startsWith('R_STEP_UP_') || l.key.startsWith('L_STEP_UP_')).map(l=>({ x:l.x - ref.x, z:l.z - ref.z, text:l.label })),
+      ...landmarks
+        .filter(l=>l.key.startsWith('R_STEP_UP_') || l.key.startsWith('L_STEP_UP_') || l.key.startsWith('R_SLOPE_SH_') || l.key.startsWith('L_SLOPE_SH_') || l.key.startsWith('R_SLOPE_TOE_') || l.key.startsWith('L_SLOPE_TOE_'))
+        .map(l=>({ x:l.x - ref.x, z:l.z - ref.z, text:l.label })),
     ] : [];
 
+    const marks = pickLm ? [{ x: pickLm.x - ref.x, z: pickLm.z - ref.z, r: 7, color:'#ef4444' }] : [];
 
-    drawCrossPreviewCanvas(canvas, polyShift, labels);
-    // cache for CSV export
-    state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX: ref.x, baseZ: ref.z, pts: polyShift, landmarks };
+    drawCrossPreviewCanvas(canvas, polyShift, labels, marks);
 
     if (infoEl) {
       const sLabel = metersToStaPitch(m, pitchNow, 3);
@@ -5452,12 +5751,70 @@ const cr = computeCrossSide("common", "right");
     }
 
     if (tblEl) {
-      const mk = m.toFixed(3);
-      const rowsToHtml = (calc, sideName)=>{
-        const lines = calc.rows.map(r=>`${r.start.toFixed(3)}→${r.end.toFixed(3)} : ${r.slopePct.toFixed(3)}%${(r.stepDz&&Math.abs(r.stepDz)>0)?(' / step '+(r.stepDz>0?'+':'')+r.stepDz.toFixed(3)+'m'):''} (Z=${r.zEnd.toFixed(3)})`);
-        return `<div style="margin-top:6px;"><b>${sideName}</b><br/>${lines.join('<br/>')}</div>`;
+      // centerline design elevation
+      let zc = NaN;
+      if (state.profile && state.profile.enabled) {
+        try {
+          const pm = buildProfileModel(state.profile, res.total);
+          if (pm && pm.ok) zc = evalProfileZ(pm, m);
+        } catch {}
+      }
+
+      // representative points (shifted coords) + plan elevation
+      const reps = landmarks.map(l=>({
+        key: l.key,
+        label: l.label,
+        x: l.x - ref.x,
+        z: l.z - ref.z,
+        zPlan: Number.isFinite(zc) ? (zc + l.z) : NaN,
+      }));
+
+      // stable ordering: CL first, then right, then left, then ends
+      const orderKey = (k)=>{
+        if (k==='CL') return 0;
+        if (k.startsWith('R_')) return 1;
+        if (k.startsWith('L_')) return 2;
+        return 9;
       };
-      tblEl.innerHTML = rowsToHtml(lCalc,'左(-)') + rowsToHtml(rCalc,'右(+)');
+      reps.sort((a,b)=>{
+        const oa = orderKey(a.key), ob = orderKey(b.key);
+        if (oa!==ob) return oa-ob;
+        return a.label.localeCompare(b.label,'ja');
+      });
+
+      const sLabel = metersToStaPitch(m, pitchNow, 3);
+      const zcTxt = Number.isFinite(zc) ? zc.toFixed(3) : '—';
+      const rowsHtml = reps.map(r=>{
+        const x = Number(r.x).toFixed(3);
+        const z = Number(r.z).toFixed(3);
+        const zp = Number.isFinite(r.zPlan) ? Number(r.zPlan).toFixed(3) : '—';
+        const active = (String(state.cross.ui.previewPickKey||'')===r.key);
+        return `<tr data-pick-key="${r.key}" style="cursor:pointer;${active?'background:#fee2e2;':''}"><td>${r.label}</td><td class="right">${x}</td><td class="right">${z}</td><td class="right">${zp}</td></tr>`;
+      }).join('');
+
+      tblEl.innerHTML = `
+        <div class="mini"><b>代表点（基準後座標）</b> / 測点 ${sLabel} (${m.toFixed(3)}m) / CL計画標高 ${zcTxt}m</div>
+        <div style="overflow:auto; margin-top:6px;">
+          <table>
+            <thead><tr><th>点名</th><th class="right">x(m)</th><th class="right">z(m)</th><th class="right">計画標高(m)</th></tr></thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      `;
+
+      // click to highlight
+      tblEl.onclick = (ev)=>{
+        const tr = ev.target.closest('tr[data-pick-key]');
+        if (!tr) return;
+        const k = tr.getAttribute('data-pick-key');
+        state.cross.ui.previewPickKey = k;
+        saveState();
+        drawPreview(state.cross.ui.previewTok||'0.000');
+      };
+
+      // cache for CSV export
+      state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX: ref.x, baseZ: ref.z, pts: polyShift, landmarks, reps, zc };
+    } else {
     }
   };
 
@@ -5495,6 +5852,21 @@ const cr = computeCrossSide("common", "right");
   if (chkLbl) {
     chkLbl.onchange = ()=>{ drawPreview(state.cross.ui.previewTok||'0.000'); };
   }
+
+  const tblRep = document.getElementById('xsPreviewTable');
+  if (tblRep) {
+    tblRep.onclick = (ev)=>{
+      const tr = ev.target && ev.target.closest ? ev.target.closest('[data-xs-pick]') : null;
+      if (!tr) return;
+      const key = tr.getAttribute('data-xs-pick');
+      if (!key) return;
+      ensureCrossState();
+      state.cross.ui.previewPickKey = key;
+      saveState();
+      drawPreview(state.cross.ui.previewTok||'0.000');
+    };
+  }
+
   const btnCsv = document.getElementById('xsExportCsv');
   if (btnCsv) {
     btnCsv.onclick = ()=>{
@@ -5516,6 +5888,31 @@ const cr = computeCrossSide("common", "right");
       setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     };
   }
+
+
+  const btnRep = document.getElementById('xsExportRepCsv');
+  if (btnRep) {
+    btnRep.onclick = ()=>{
+      ensureCrossState();
+      const c = state.cross.ui.previewCache;
+      if (!c || !Array.isArray(c.reps)) { alert('先にプレビューを表示してください'); return; }
+      const lines = [];
+      lines.push(['sta_m','name','x','z','plan_z'].join(','));
+      for (const r of c.reps) {
+        const zp = Number.isFinite(r.zPlan) ? Number(r.zPlan).toFixed(3) : '';
+        lines.push([Number(c.m).toFixed(3), r.label, Number(r.x).toFixed(3), Number(r.z).toFixed(3), zp].join(','));
+      }
+      const csv = lines.join('\n');
+      const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `xs_reps_${Number(c.m).toFixed(3)}m.csv`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    };
+  }
+
 
   const btnSetEnd = document.getElementById('xsSetEndToTotal');
   if (btnSetEnd) {
@@ -6007,6 +6404,13 @@ document.querySelectorAll("[data-jump]").forEach(btn=>{
     });
   }
   applyHeaderCollapsed();
+})();
+
+
+// version badge
+(function(){
+  const b = document.getElementById('appVerBadge');
+  if (b && window.APP_VERSION) b.textContent = "v" + window.APP_VERSION;
 })();
 
 render();
