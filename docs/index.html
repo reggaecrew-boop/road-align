@@ -11,7 +11,7 @@
   <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.9.8";
+    window.APP_VERSION = "18.9.9";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -5648,98 +5648,6 @@ const cr = computeCrossSide("common", "right");
     };
     addSlopeLandmarks(rCalc.rows, +1, 'R');
     addSlopeLandmarks(lCalc.rows, -1, 'L');
-
-
-    // slopes (right/left) from elem-derived seg metadata (src='SLOPE')
-    let slopeIdxR = 0;
-    {
-      let zPrev = 0;
-      let prevIsSlope = false;
-      for (let i=0;i<rCalc.rows.length;i++) {
-        const row = rCalc.rows[i];
-        const isSlope = (row && row.src==='SLOPE');
-        const zStart = zPrev;
-        if (isSlope && !prevIsSlope) {
-          slopeIdxR++;
-          landmarks.push({ key:`R_SLOPE_SH_${slopeIdxR}`, label:`右 法肩 #${slopeIdxR}`, x: row.start, z: zStart });
-        }
-        const next = rCalc.rows[i+1];
-        const nextIsSlope = !!(next && next.src==='SLOPE');
-        if (isSlope && !nextIsSlope) {
-          landmarks.push({ key:`R_SLOPE_TOE_${slopeIdxR}`, label:`右 法尻 #${slopeIdxR}`, x: row.end, z: row.zEnd });
-        }
-        zPrev = row.zEnd;
-        prevIsSlope = isSlope;
-      }
-    }
-
-    let slopeIdxL = 0;
-    {
-      let zPrev = 0;
-      let prevIsSlope = false;
-      for (let i=0;i<lCalc.rows.length;i++) {
-        const row = lCalc.rows[i];
-        const isSlope = (row && row.src==='SLOPE');
-        const zStart = zPrev;
-        if (isSlope && !prevIsSlope) {
-          slopeIdxL++;
-          landmarks.push({ key:`L_SLOPE_SH_${slopeIdxL}`, label:`左 法肩 #${slopeIdxL}`, x: -row.start, z: zStart });
-        }
-        const next = lCalc.rows[i+1];
-        const nextIsSlope = !!(next && next.src==='SLOPE');
-        if (isSlope && !nextIsSlope) {
-          landmarks.push({ key:`L_SLOPE_TOE_${slopeIdxL}`, label:`左 法尻 #${slopeIdxL}`, x: -row.end, z: row.zEnd });
-        }
-        zPrev = row.zEnd;
-        prevIsSlope = isSlope;
-      }
-    }
-
-    // slopes (right)
-    let slopeIdxR = 0;
-    let zPrevR = 0;
-    let prevSrcR = '';
-    for (let i=0;i<rCalc.rows.length;i++) {
-      const row = rCalc.rows[i];
-      const src = String(row.src||'');
-      const isSlope = (src === 'SLOPE');
-      const wasSlope = (prevSrcR === 'SLOPE');
-      const zStart = zPrevR;
-      if (isSlope && !wasSlope) {
-        slopeIdxR++;
-        landmarks.push({ key:`R_SLOPE_SH_${slopeIdxR}`, label:`右 法面肩 #${slopeIdxR}`, x: row.start, z: zStart });
-      }
-      const next = rCalc.rows[i+1];
-      const nextIsSlope = (String(next?.src||'') === 'SLOPE');
-      if (isSlope && !nextIsSlope) {
-        landmarks.push({ key:`R_SLOPE_TOE_${slopeIdxR}`, label:`右 法面尻 #${slopeIdxR}`, x: row.end, z: row.zEnd });
-      }
-      zPrevR = row.zEnd;
-      prevSrcR = src;
-    }
-
-    // slopes (left)
-    let slopeIdxL = 0;
-    let zPrevL = 0;
-    let prevSrcL = '';
-    for (let i=0;i<lCalc.rows.length;i++) {
-      const row = lCalc.rows[i];
-      const src = String(row.src||'');
-      const isSlope = (src === 'SLOPE');
-      const wasSlope = (prevSrcL === 'SLOPE');
-      const zStart = zPrevL;
-      if (isSlope && !wasSlope) {
-        slopeIdxL++;
-        landmarks.push({ key:`L_SLOPE_SH_${slopeIdxL}`, label:`左 法面肩 #${slopeIdxL}`, x: -row.start, z: zStart });
-      }
-      const next = lCalc.rows[i+1];
-      const nextIsSlope = (String(next?.src||'') === 'SLOPE');
-      if (isSlope && !nextIsSlope) {
-        landmarks.push({ key:`L_SLOPE_TOE_${slopeIdxL}`, label:`左 法面尻 #${slopeIdxL}`, x: -row.end, z: row.zEnd });
-      }
-      zPrevL = row.zEnd;
-      prevSrcL = src;
-    }
 
     // ends
     landmarks.push({ key:'R_END', label:'右端', x: rCalc.lastEnd, z: rCalc.lastZ });
