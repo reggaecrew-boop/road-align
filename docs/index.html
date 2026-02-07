@@ -11,7 +11,7 @@
   <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.9.9";
+    window.APP_VERSION = "18.9.10";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -3385,9 +3385,9 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
   if (crossOv && crossOv.enabled && Number.isFinite(crossOv.sta)) {
     try {
       const p = evalAlignment(segments, crossOv.sta);
-      const th = p.az;
+      const psi = psiFromAz(p.az);
       // right normal (right is +)
-      const nRx = Math.sin(th), nRy = -Math.cos(th);
+      const nRx = Math.sin(psi), nRy = -Math.cos(psi);
       const L = Math.max(0, Number(crossOv.Wleft||0));
       const R = Math.max(0, Number(crossOv.Wright||0));
       pushPt(p.E + (-L)*nRx, p.N + (-L)*nRy);
@@ -3396,6 +3396,10 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
       for (const q of pts) {
         if (!q || !Number.isFinite(q.x)) continue;
         pushPt(p.E + q.x*nRx, p.N + q.x*nRy);
+      }
+      const qp = crossOv.queryPoint;
+      if (qp && Number.isFinite(qp.x)) {
+        pushPt(p.E + qp.x*nRx, p.N + qp.x*nRy);
       }
     } catch(e){}
   }
@@ -3474,8 +3478,8 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
   if (crossOv && crossOv.enabled && Number.isFinite(crossOv.sta)) {
     try {
       const p = evalAlignment(segments, crossOv.sta);
-      const th = p.az;
-      const nRx = Math.sin(th), nRy = -Math.cos(th);
+      const psi = psiFromAz(p.az);
+      const nRx = Math.sin(psi), nRy = -Math.cos(psi);
       const L = Math.max(0, Number(crossOv.Wleft||0));
       const R = Math.max(0, Number(crossOv.Wright||0));
 
@@ -3510,6 +3514,21 @@ function drawPlanCanvas(canvas, segments, workPoints, keypoints, options) {
         ctx.arc(qx, qy, q.isSelected ? 6 : 4, 0, Math.PI*2);
         ctx.fillStyle = q.isSelected ? "#ef4444" : "#2563eb";
         ctx.fill();
+      }
+      // query point (STA + side + offset) if present
+      const qp = crossOv.queryPoint;
+      if (qp && Number.isFinite(qp.x)) {
+        const QE = p.E + qp.x*nRx;
+        const QN = p.N + qp.x*nRy;
+        const [qx,qy] = toXY(QE,QN);
+        ctx.beginPath();
+        ctx.arc(qx, qy, 6, 0, Math.PI*2);
+        ctx.strokeStyle = "#14532d";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = "#16a34a";
+        ctx.fill();
+        ctx.lineWidth = 1;
       }
 
       // label
@@ -4395,7 +4414,8 @@ viewPlan.querySelectorAll("button[data-c-del]").forEach(btn=>{
       minX = Math.min(...poly.map(p=>p.x));
       maxX = Math.max(...poly.map(p=>p.x));
     }
-    crossOv = { enabled:true, sta, Wleft: Math.max(0, -minX), Wright: Math.max(0, maxX), points: pts };
+    const qp = crossCache.queryPoint || null;
+    crossOv = { enabled:true, sta, Wleft: Math.max(0, -minX), Wright: Math.max(0, maxX), points: pts, queryPoint: qp };
   }
 
   drawPlanCanvas(canvas, res.segments, workPoints, res.keypoints, {
@@ -5680,6 +5700,41 @@ const cr = computeCrossSide("common", "right");
 
     const marks = pickLm ? [{ x: pickLm.x - ref.x, z: pickLm.z - ref.z, r: 7, color:'#ef4444' }] : [];
 
+    // add query point mark (from Output tab: STA + side + offset)
+    const qp = state.cross?.ui?.queryPoint;
+    const sameSta = qp && Number.isFinite(qp.m) && Math.abs(qp.m - m) < 1e-6;
+    const zAtX = (polyPts, x)=>{
+      if (!polyPts || polyPts.length < 2) return 0;
+      const pts = polyPts.slice().sort((a,b)=>a.x-b.x);
+      if (x <= pts[0].x) {
+        const a=pts[0], b=pts[1];
+        const t=(x-a.x)/Math.max(1e-9,(b.x-a.x));
+        return a.z + t*(b.z-a.z);
+      }
+      if (x >= pts[pts.length-1].x) {
+        const a=pts[pts.length-2], b=pts[pts.length-1];
+        const t=(x-a.x)/Math.max(1e-9,(b.x-a.x));
+        return a.z + t*(b.z-a.z);
+      }
+      for (let i=0;i<pts.length-1;i++){
+        const a=pts[i], b=pts[i+1];
+        if (x >= a.x-1e-9 && x <= b.x+1e-9){
+          const t=(x-a.x)/Math.max(1e-9,(b.x-a.x));
+          return a.z + t*(b.z-a.z);
+        }
+      }
+      return 0;
+    };
+    if (sameSta && qp) {
+      const zq = zAtX(poly, qp.x);
+      const mx = qp.x - ref.x;
+      const mz = zq - ref.z;
+      marks.push({ x: mx, z: mz, r: 8, color:'#16a34a' });
+      state.cross.ui.queryPoint._zRel = zq;
+      state.cross.ui.queryPoint._xShift = mx;
+      state.cross.ui.queryPoint._zShift = mz;
+    }
+
     drawCrossPreviewCanvas(canvas, polyShift, labels, marks);
 
     if (infoEl) {
@@ -5687,6 +5742,14 @@ const cr = computeCrossSide("common", "right");
       const modeR = `${R.info.source}:${R.info.mode}`;
       const modeL = `${L.info.source}:${L.info.mode}`;
       infoEl.textContent = `${sLabel} (${m.toFixed(3)}m)  右(+): ${rCalc.lastEnd.toFixed(3)}m [${modeR}] / 左(-): ${lCalc.lastEnd.toFixed(3)}m [${modeL}]`;
+
+      const qp2 = state.cross?.ui?.queryPoint;
+      if (qp2 && Number.isFinite(qp2.m) && Math.abs(qp2.m - m) < 1e-6) {
+        const sideTxt = (qp2.side==="right"?"右":qp2.side==="left"?"左":"中心");
+        const zcTxt2 = Number.isFinite(zc) ? zc.toFixed(3) : '—';
+        const zpTxt2 = Number.isFinite(qp2.zPlan) ? qp2.zPlan.toFixed(3) : '—';
+        infoEl.textContent += ` / 指定点(${sideTxt} ${qp2.off.toFixed(3)}m): CL=${zcTxt2} ΔZ=${qp2.dz.toFixed(3)} 計画=${zpTxt2}`;
+      }
     }
 
     if (tblEl) {
@@ -5752,7 +5815,8 @@ const cr = computeCrossSide("common", "right");
       };
 
       // cache for CSV export
-      state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX: ref.x, baseZ: ref.z, pts: polyShift, landmarks, reps, zc };
+      const qpCache = (state.cross?.ui?.queryPoint && Math.abs((state.cross.ui.queryPoint.m||0) - m) < 1e-6) ? state.cross.ui.queryPoint : null;
+      state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX: ref.x, baseZ: ref.z, pts: polyShift, landmarks, reps, zc, queryPoint: qpCache };
     } else {
     }
   };
@@ -6195,6 +6259,14 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         if (side !== "center") cr = evalCrossDzAtSta(m, side, off);
 
         const z = Number.isFinite(zc) ? (zc + cr.dz) : NaN;
+
+        // store query point for cross/plan overlay
+        ensureCrossState();
+        const xSigned = (side==="right" ? +off : side==="left" ? -off : 0);
+        state.cross.ui.queryPoint = { m, staDispPitch, side, off, x: xSigned, dz: cr.dz, zPlan: z };
+        // sync cross preview station to this STA so user can see it in simple cross view
+        state.cross.ui.previewTok = staDispPitch;
+        saveState();
 
         // show segment info
         let segInfoHtml = "";
