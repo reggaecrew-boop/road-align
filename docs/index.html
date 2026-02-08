@@ -11,7 +11,7 @@
   <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.9.11";
+    window.APP_VERSION = "18.10.0";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -564,6 +564,315 @@ async function readLocalFileText(file){
   // xrf is UTF-8 xml in practice
   return tryDec("utf-8") || tryDec("shift_jis") || new TextDecoder().decode(u8);
 }
+
+/* =======================
+   DXF IMPORT (ASCII DXF)
+   ======================= */
+
+function dxfParsePairs(text){
+  // ASCII DXF is: <groupCode>\n<value>\n repeating.
+  const lines = String(text||"").replace(/\r\n/g,"\n").replace(/\r/g,"\n").split("\n");
+  const pairs = [];
+  for (let i=0; i<lines.length-1; i+=2){
+    const code = String(lines[i]||"").trim();
+    const val = lines[i+1] ?? "";
+    if (code === "") continue;
+    pairs.push([code, val]);
+  }
+  return pairs;
+}
+
+function dxfExtractTextLike(text){
+  const pairs = dxfParsePairs(text);
+  const kinds = new Set(["TEXT","MTEXT","ATTRIB","DIMENSION"]);
+  const out = [];
+  let cur = null;
+  for (let i=0;i<pairs.length;i++){
+    const [code, val] = pairs[i];
+    if (code === "0"){
+      if (cur && cur.text) out.push(cur);
+      if (kinds.has(val)) cur = { etype: val, layer:"", x:null, y:null, h:null, text:"" };
+      else cur = null;
+      continue;
+    }
+    if (!cur) continue;
+    if (code === "8") cur.layer = val;
+    else if (code === "10") cur.x = parseFloat(val);
+    else if (code === "20") cur.y = parseFloat(val);
+    else if (code === "40") cur.h = parseFloat(val);
+    else if (code === "1" || code === "3"){
+      if (cur.etype === "MTEXT") cur.text += val;
+      else if (code === "1") cur.text += val;
+    }
+  }
+  if (cur && cur.text) out.push(cur);
+
+  const clean = (s)=>String(s||"")
+    .replace(/\\A\d+;/g,"")
+    .replace(/\\P/g,"\n")
+    .replace(/[{}]/g,"")
+    .replace(/　/g," ")
+    .trim();
+
+  return out.map(r=>({
+    etype:r.etype,
+    layer:String(r.layer||""),
+    x:Number.isFinite(r.x)?r.x:null,
+    y:Number.isFinite(r.y)?r.y:null,
+    h:Number.isFinite(r.h)?r.h:null,
+    text: clean(r.text)
+  }));
+}
+
+function dxfExtractLwPolylines(text){
+  const pairs = dxfParsePairs(text);
+  const out = [];
+  let cur = null;
+  for (let i=0;i<pairs.length;i++){
+    const [code,val] = pairs[i];
+    if (code === "0"){
+      if (cur) out.push(cur);
+      if (val === "LWPOLYLINE") cur = { layer:"", xs:[], ys:[], flags:0 };
+      else cur = null;
+      continue;
+    }
+    if (!cur) continue;
+    if (code === "8") cur.layer = val;
+    else if (code === "10") cur.xs.push(parseFloat(val));
+    else if (code === "20") cur.ys.push(parseFloat(val));
+    else if (code === "70") cur.flags = parseInt(val,10)||0;
+  }
+  if (cur) out.push(cur);
+  return out.map(p=>{
+    const n = Math.min(p.xs.length, p.ys.length);
+    const pts = [];
+    for (let i=0;i<n;i++) pts.push([p.xs[i], p.ys[i]]);
+    return { layer:String(p.layer||""), closed: ((p.flags|0)&1)===1, pts };
+  }).filter(r=>r.pts && r.pts.length>=2);
+}
+
+function polylineLength(pts, closed){
+  let L=0;
+  for (let i=0;i<pts.length-1;i++){
+    const dx=pts[i+1][0]-pts[i][0];
+    const dy=pts[i+1][1]-pts[i][1];
+    L += Math.hypot(dx,dy);
+  }
+  if (closed && pts.length>2){
+    const dx=pts[0][0]-pts[pts.length-1][0];
+    const dy=pts[0][1]-pts[pts.length-1][1];
+    L += Math.hypot(dx,dy);
+  }
+  return L;
+}
+
+function rdpSimplify(points, eps){
+  if (!points || points.length<3) return points || [];
+  const p0 = points[0];
+  const p1 = points[points.length-1];
+  const dx = p1[0]-p0[0], dy=p1[1]-p0[1];
+  const denom = dx*dx+dy*dy;
+  let maxD=-1, idx=-1;
+  for (let i=1;i<points.length-1;i++){
+    const p = points[i];
+    let dist;
+    if (denom===0){
+      dist = Math.hypot(p[0]-p0[0], p[1]-p0[1]);
+    } else {
+      const t = ((p[0]-p0[0])*dx+(p[1]-p0[1])*dy)/denom;
+      const tt = Math.max(0, Math.min(1, t));
+      const cx = p0[0]+tt*dx, cy=p0[1]+tt*dy;
+      dist = Math.hypot(p[0]-cx, p[1]-cy);
+    }
+    if (dist>maxD){ maxD=dist; idx=i; }
+  }
+  if (maxD>eps){
+    const left = rdpSimplify(points.slice(0, idx+1), eps);
+    const right = rdpSimplify(points.slice(idx), eps);
+    return left.slice(0, left.length-1).concat(right);
+  }
+  return [p0, p1];
+}
+
+function projectPointToPolyline(px, py, pts){
+  // returns {sta, dist, foot:[x,y]}
+  let best = { sta:0, dist: Infinity, foot:[pts[0][0], pts[0][1]] };
+  let cum = 0;
+  for (let i=0;i<pts.length-1;i++){
+    const x1=pts[i][0], y1=pts[i][1];
+    const x2=pts[i+1][0], y2=pts[i+1][1];
+    const dx=x2-x1, dy=y2-y1;
+    const segLen = Math.hypot(dx,dy);
+    if (!Number.isFinite(segLen) || segLen===0){ continue; }
+    let t = ((px-x1)*dx + (py-y1)*dy)/(segLen*segLen);
+    t = Math.max(0, Math.min(1, t));
+    const fx = x1 + t*dx, fy = y1 + t*dy;
+    const dist = Math.hypot(px-fx, py-fy);
+    const sta = cum + t*segLen;
+    if (dist < best.dist){ best = { sta, dist, foot:[fx,fy] }; }
+    cum += segLen;
+  }
+  return best;
+}
+
+function staTokenToMeters(tok){
+  const t = String(tok||"").toUpperCase().replace(/STA\.?/g,"").replace(/\s+/g,"").replace(/＋/g,"+");
+  const m = t.match(/([+-]?\d+)\+(\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  const km = parseInt(m[1],10);
+  const mm = parseFloat(m[2]);
+  if (!Number.isFinite(km) || !Number.isFinite(mm)) return null;
+  return km*1000 + mm;
+}
+
+function findRowNearLabel(texts, labelRegex){
+  const hit = texts.find(t=>labelRegex.test(t.text||""));
+  if (!hit || !Number.isFinite(hit.y)) return null;
+  const y0 = hit.y;
+  // numeric cells on same row (loose tolerance)
+  const nums = texts
+    .filter(t=>Number.isFinite(t.x) && Number.isFinite(t.y) && Math.abs(t.y-y0) <= 3)
+    .map(t=>({x:t.x, y:t.y, raw:t.text}))
+    .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(String(r.raw).trim()))
+    .map(r=>({x:r.x, y:r.y, v: parseFloat(String(r.raw).trim())}))
+    .filter(r=>Number.isFinite(r.v))
+    .sort((a,b)=>a.x-b.x);
+  return { y0, cells: nums };
+}
+
+function dxfBuildPlanFromCenterline(dxfText){
+  // heuristic: pick longest LWPOLYLINE on layer C-STR-RANE-既設 with high sheet Y
+  const polylines = dxfExtractLwPolylines(dxfText);
+  const candidates = polylines
+    .filter(p=>p.layer==="C-STR-RANE-既設")
+    .map(p=>{
+      let minY=Infinity;
+      for (const pt of p.pts) minY = Math.min(minY, pt[1]);
+      return {p, L: polylineLength(p.pts,p.closed), minY};
+    })
+    .filter(r=>r.L>1000)
+    .filter(r=>r.minY>22000);
+  const best = candidates.sort((a,b)=>b.L-a.L)[0];
+  if (!best) throw new Error("中心線（LWPOLYLINE / layer=C-STR-RANE-既設）が見つかりません");
+
+  const pts = rdpSimplify(best.p.pts, 0.01);
+  if (pts.length<2) throw new Error("中心線の点列が不足しています");
+  const bp = pts[0];
+  const ep = pts[pts.length-1];
+  const ips = pts.slice(1, pts.length-1);
+  return { bp, ep, ips, clPts: pts };
+}
+
+function dxfBuildProfileFromBoxTable(dxfText){
+  const texts = dxfExtractTextLike(dxfText).filter(t=>Number.isFinite(t.x)&&Number.isFinite(t.y));
+  // find labels (best-effort)
+  const rowSta = findRowNearLabel(texts, /累加\s*距離|累加距離/);
+  const rowZ   = findRowNearLabel(texts, /計画\s*高|計画高/);
+  if (!rowSta || rowSta.cells.length<2) throw new Error("箱書きの『累加距離』行が見つかりません");
+  if (!rowZ   || rowZ.cells.length<2)   throw new Error("箱書きの『計画高』行が見つかりません");
+
+  // map by nearest x
+  const zs = rowZ.cells;
+  const points = rowSta.cells.map(c=>{
+    let best = zs[0];
+    let bestDx = Math.abs(best.x - c.x);
+    for (const z of zs){
+      const dx = Math.abs(z.x - c.x);
+      if (dx < bestDx){ bestDx = dx; best = z; }
+    }
+    return { sta: c.v, z: best.v };
+  }).filter(p=>Number.isFinite(p.sta)&&Number.isFinite(p.z));
+
+  points.sort((a,b)=>a.sta-b.sta);
+  if (points.length<2) throw new Error("箱書きから測点・標高の点が十分に取れません");
+
+  const startSta = points[0].sta;
+  const startZ   = points[0].z;
+  const grades = [];
+  for (let i=0;i<points.length-1;i++){
+    const s0=points[i].sta, z0=points[i].z;
+    const s1=points[i+1].sta, z1=points[i+1].z;
+    const g = 100*(z1-z0)/(s1-s0);
+    grades.push({ id: i+1, nextSta: +s1.toFixed(3), gradePct: +g.toFixed(6) });
+  }
+  return { startSta: +startSta.toFixed(3), startZ: +startZ.toFixed(3), grades };
+}
+
+function dxfFindStaListNearCL(dxfText){
+  const texts = dxfExtractTextLike(dxfText).filter(t=>t.text && /\+/.test(t.text));
+  const stas = [];
+  for (const t of texts){
+    const m = staTokenToMeters(t.text);
+    if (m==null) continue;
+    stas.push(+m.toFixed(3));
+  }
+  // unique
+  const uniq = Array.from(new Set(stas)).sort((a,b)=>a-b);
+  return uniq;
+}
+
+function dxfFindBridgeRanges(dxfText, clPts){
+  const texts = dxfExtractTextLike(dxfText)
+    .filter(t=>t.layer && t.layer.toUpperCase().includes('BRDG'))
+    .filter(t=>t.text && /^[AP]\d$/i.test(String(t.text).trim()))
+    .filter(t=>Number.isFinite(t.x) && Number.isFinite(t.y));
+  const pts = [];
+  for (const t of texts){
+    const pr = projectPointToPolyline(t.x, t.y, clPts);
+    if (!Number.isFinite(pr.sta) || !Number.isFinite(pr.dist)) continue;
+    if (pr.dist > 60) continue; // far from CL -> ignore
+    pts.push({ label: String(t.text).trim().toUpperCase(), sta: pr.sta });
+  }
+  pts.sort((a,b)=>a.sta-b.sta);
+  // cluster by station gap
+  const clusters = [];
+  let cur = [];
+  for (const p of pts){
+    if (!cur.length){ cur.push(p); continue; }
+    if (p.sta - cur[cur.length-1].sta <= 300){ cur.push(p); }
+    else { clusters.push(cur); cur=[p]; }
+  }
+  if (cur.length) clusters.push(cur);
+  const ranges = clusters
+    .map((c,i)=>({
+      group: i+1,
+      start: Math.min(...c.map(r=>r.sta)),
+      end: Math.max(...c.map(r=>r.sta)),
+      labels: c.map(r=>r.label)
+    }))
+    .filter(r=>Number.isFinite(r.start)&&Number.isFinite(r.end)&&r.end>r.start);
+  return ranges;
+}
+
+function buildSideFromSimple(simpleSegs){
+  const segs = (simpleSegs||[]).map((s,i)=>({
+    id: Number.isFinite(s.id)?s.id:(i+1),
+    end: +(+s.end).toFixed(3),
+    mode: 'pct',
+    slopePct: +(+s.slopePct).toFixed(3),
+    ratioX: 20,
+    ratioDir: 'down',
+    stepDz: 0
+  })).filter(s=>Number.isFinite(s.end));
+  return { segs, nextSegId: (Math.max(0,...segs.map(s=>s.id))+1) };
+}
+
+function getStdCrossTemplate(which){
+  // Standard templates derived from earlier DXF extraction. Edit here if your standard changes.
+  // which: 4/5/6
+  if (which===6){
+    return {
+      right: buildSideFromSimple([{id:1,end:3.5,slopePct:-2.0},{id:2,end:5.0,slopePct:-2.5}]),
+      left:  buildSideFromSimple([{id:1,end:3.5,slopePct:-2.0},{id:2,end:5.25,slopePct:-2.5}])
+    };
+  }
+  // 4/5: shoulder max (1.750〜2.500) -> end=6.0 as safe template
+  return {
+    right: buildSideFromSimple([{id:1,end:3.5,slopePct:-2.0},{id:2,end:6.0,slopePct:-2.5}]),
+    left:  buildSideFromSimple([{id:1,end:3.5,slopePct:-2.0},{id:2,end:6.0,slopePct:-2.5}])
+  };
+}
+
 
 function parseSimaA01Points(text){
   const pts = [];
@@ -3773,6 +4082,22 @@ const render = () => {
       </div>
     </div>
 
+    <div class="card" id="secPlanDxfImport">
+      <h2>平面線形の読み込み（DXF）</h2>
+      <div class="grid grid-2">
+        <div>
+          <label>ファイル（ASCII DXF .dxf）</label>
+          <input id="planDxfFile" type="file" accept=".dxf,text/plain" />
+          <div class="mini">平面図（003～008）想定。中心線（LWPOLYLINE）を探索してBP/EP/IPを作成します。橋梁(A1/A2/P1…のラベル)も見つけた場合は、橋梁区間のSTAに横断⑥を割当します。</div>
+        </div>
+        <div>
+          <label>読み込み</label>
+          <button class="btn" id="btnPlanDxfImport">DXFを解析して反映</button>
+          <div id="planDxfMsg" class="mini" style="margin-top:8px;"></div>
+        </div>
+      </div>
+    </div>
+
     <div class="card" id="secCoordCatalog">
       <h2>座標一覧（CSV）</h2>
       <div class="grid grid-3">
@@ -4063,6 +4388,49 @@ const render = () => {
         throw new Error("拡張子が .sim / .sima / .xrf のファイルを選択してください");
       }catch(e){
         if (msg) msg.textContent = `読み込みエラー：${e && e.message ? e.message : e}`;
+      }
+    };
+  })();
+
+  /* Plan DXF import bind */
+  (function(){
+    const fi = document.getElementById("planDxfFile");
+    const btn = document.getElementById("btnPlanDxfImport");
+    const msg = document.getElementById("planDxfMsg");
+    if (!fi || !btn) return;
+    btn.onclick = async ()=>{
+      try{
+        const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+        if (!file){ if (msg) msg.textContent = "DXFファイルを選択してください。"; return; }
+        if (msg) msg.textContent = "DXF解析中…";
+        const dxfText = await readLocalFileText(file);
+
+        // build plan (BP/EP/IP)
+        const pl = dxfBuildPlanFromCenterline(dxfText);
+        state.bp = { name:"BP", N: +pl.bp[1], E: +pl.bp[0] };
+        state.ep = { name:"EP", N: +pl.ep[1], E: +pl.ep[0] };
+        state.ipPoints = pl.ips.map((p,i)=>({ id:i+1, name:`IP${i+1}`, N:+p[1], E:+p[0] }));
+        state.useIpCount = state.ipPoints.length;
+
+        // bridge -> cross6 overrides (best-effort)
+        try{
+          const ranges = dxfFindBridgeRanges(dxfText, pl.clPts);
+          if (ranges && ranges.length){
+            const cross6 = getStdCrossTemplate(6);
+            const commonBack = { right: cloneDeep(state.cross.right), left: cloneDeep(state.cross.left) };
+            for (const r of ranges){
+              const k1 = (+r.start).toFixed(3);
+              const k2 = (+r.end).toFixed(3);
+              state.cross.overrides[k1] = cross6;
+              state.cross.overrides[k2] = commonBack;
+            }
+          }
+        }catch(_){ /* ignore bridge errors */ }
+
+        saveState(); render();
+        if (msg) msg.textContent = `反映OK：IP ${state.ipPoints.length}点（折れ線近似）`;
+      }catch(e){
+        if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
       }
     };
   })();
@@ -4446,6 +4814,19 @@ viewProfile.innerHTML = `
   <div class="card" id="secProfile">
     <h2>縦断線形（勾配区間 + 縦断曲線：VPI単位）</h2>
 
+    <div class="grid grid-2" style="margin-top:8px;">
+      <div>
+        <label>縦断図DXF（ASCII .dxf）</label>
+        <input id="profileDxfFile" type="file" accept=".dxf,text/plain" />
+        <div class="mini">箱書き表（累加距離×計画高）を探索し、縦断（startSta/startZ + grades）へ自動反映します。</div>
+      </div>
+      <div>
+        <label>読み込み</label>
+        <button class="btn" id="btnProfileDxfImport">DXFを解析して反映</button>
+        <div id="profileDxfMsg" class="mini" style="margin-top:8px;"></div>
+      </div>
+    </div>
+
     <div class="grid grid-4">
       <div>
         <label class="mini"><input id="profEnabled" type="checkbox" /> 縦断を使う（GL出力）</label>
@@ -4626,6 +5007,38 @@ viewProfile.innerHTML = `
 
 document.getElementById("profEnabled").checked = !!prof.enabled;
 document.getElementById("profEnabled").onchange = (e)=>{ state.profile.enabled = !!e.target.checked; saveState(); render(); };
+
+/* Profile DXF import bind */
+(function(){
+  const fi = document.getElementById('profileDxfFile');
+  const btn = document.getElementById('btnProfileDxfImport');
+  const msg = document.getElementById('profileDxfMsg');
+  if (!fi || !btn) return;
+  btn.onclick = async ()=>{
+    try{
+      const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+      if (!file){ if (msg) msg.textContent = 'DXFファイルを選択してください。'; return; }
+      if (msg) msg.textContent = 'DXF解析中…';
+      const dxfText = await readLocalFileText(file);
+      const pr = dxfBuildProfileFromBoxTable(dxfText);
+
+      // apply
+      state.profile.startSta = pr.startSta;
+      state.profile.startZ = pr.startZ;
+      state.profile.grades = pr.grades.map((r,i)=>({ id:i+1, nextSta: r.nextSta, gradePct: r.gradePct }));
+      state.profile.nextGradeId = state.profile.grades.length + 1;
+
+      // clear v-curves (DXF box table usually does not include them)
+      state.profile.vcurves = [];
+      state.profile.nextVcurveId = 1;
+
+      saveState(); render();
+      if (msg) msg.textContent = `反映OK：点 ${pr.grades.length+1}、勾配区間 ${pr.grades.length}件`;
+    }catch(e){
+      if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
+    }
+  };
+})();
 const inStartSta = document.getElementById("startSta");
   const commitStartSta = ()=>{
     const t = String(inStartSta.value ?? "").trim();
@@ -4951,6 +5364,19 @@ const cr = computeCrossSide("common", "right");
       <h2>横断：エレメント（中心 → 外側）</h2>
       <div class="mini">中心から外側へ、任意距離で勾配変化点を作れます。距離は自動で昇順に整列されます。</div>
 
+      <div class="grid grid-2" style="margin-top:10px;">
+        <div>
+          <label>標準横断DXF（ASCII .dxf）</label>
+          <input id="crossDxfFile" type="file" accept=".dxf,text/plain" />
+          <div class="mini">標準横断図（4/5/6など）で、CL付近のSTA表記を拾って測点別例外に登録します。橋梁区間の“共通断面（⑥）”は平面DXF読込で割当するのが基本です。</div>
+        </div>
+        <div>
+          <label>読み込み</label>
+          <button class="btn" id="btnCrossDxfImport">DXFを解析して反映</button>
+          <div id="crossDxfMsg" class="mini" style="margin-top:8px;"></div>
+        </div>
+      </div>
+
       <div class="row" style="margin-top:10px;">
         <div style="width:200px;">
           <label>横断範囲（クリップ） 右(+)(m)</label>
@@ -5243,6 +5669,57 @@ const cr = computeCrossSide("common", "right");
       </div>` : `<div class="mini" style="margin-top:10px;">（まだ横断の追加測点はありません）</div>`}
     </div>
   `;
+
+  /* Cross DXF import bind */
+  (function(){
+    const fi = document.getElementById('crossDxfFile');
+    const btn = document.getElementById('btnCrossDxfImport');
+    const msg = document.getElementById('crossDxfMsg');
+    if (!fi || !btn) return;
+    btn.onclick = async ()=>{
+      try{
+        const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+        if (!file){ if (msg) msg.textContent = 'DXFファイルを選択してください。'; return; }
+        if (msg) msg.textContent = 'DXF解析中…';
+        const dxfText = await readLocalFileText(file);
+        const name = String(file.name||"");
+
+        // decide template by filename hint (4/5/6)
+        let which = null;
+        if (/(\(|（)\s*4\s*(\)|）)/.test(name) || /横断図\s*4/.test(name) || /_0?38_/.test(name)) which = 4;
+        else if (/(\(|（)\s*5\s*(\)|）)/.test(name) || /横断図\s*5/.test(name) || /_0?39_/.test(name)) which = 5;
+        else if (/(\(|（)\s*6\s*(\)|）)/.test(name) || /横断図\s*6/.test(name) || /_0?40_/.test(name)) which = 6;
+
+        if (which === 6) {
+          // ⑥は測点が無いことが多いので、共通テンプレとして適用
+          const t6 = getStdCrossTemplate(6);
+          state.cross.right = t6.right;
+          state.cross.left  = t6.left;
+          // anchorを車道端へ寄せる（推奨）
+          state.cross.taper = state.cross.taper || { enabled:true, anchorRight:3.5, anchorLeft:3.5 };
+          state.cross.taper.anchorRight = 3.5;
+          state.cross.taper.anchorLeft = 3.5;
+          saveState(); render();
+          if (msg) msg.textContent = '反映OK：標準横断⑥を共通テンプレとして設定しました';
+          return;
+        }
+
+        if (which !== 4 && which !== 5) throw new Error('ファイル名から（4）（5）（6）の判定ができませんでした');
+
+        const stas = dxfFindStaListNearCL(dxfText);
+        if (!stas.length) throw new Error('STA表記が見つかりませんでした（CL付近の STA 0+.. 表記を確認してください）');
+        const tpl = getStdCrossTemplate(which);
+        for (const m of stas){
+          const k = (+m).toFixed(3);
+          state.cross.overrides[k] = tpl;
+        }
+        saveState(); render();
+        if (msg) msg.textContent = `反映OK：標準横断${which} を STA ${stas.length}点へ登録（例外）`;
+      }catch(e){
+        if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
+      }
+    };
+  })();
 
   // 一括距離
   const bulkBtn = document.getElementById("applyBulkCrossEnd");
