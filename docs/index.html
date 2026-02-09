@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.20";
+    window.APP_VERSION = "18.10.22";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1065,13 +1065,14 @@ function dxfExtractPlanControlPoints(dxfText){
 }
 
 
+
 function dxfBuildProfileFromBoxTable(dxfText){
   const textsAll = dxfExtractTextLike(dxfText).filter(t=>t && t.text!=null && Number.isFinite(t.x) && Number.isFinite(t.y));
   const texts = textsAll.map(t=>({x:t.x,y:t.y,text:String(t.text)}));
 
   const tolY = 3; // row tolerance
 
-  // --- STA row detection (behavior-based; not label-based) ---
+  // group by rows
   const rowMap = new Map(); // key -> items
   for (const t of texts){
     const key = Math.round(t.y / tolY) * tolY;
@@ -1079,12 +1080,11 @@ function dxfBuildProfileFromBoxTable(dxfText){
     rowMap.get(key).push(t);
   }
 
+  // --- STA row detection (supports "STA-1 -20.000" style) ---
   const tryParseStaToken = (s)=>{
     const raw = String(s||"").trim();
     if (!raw) return null;
-    // Prefer explicit STA-like tokens: contains '+' or starts with STA
-    const isStaLike = /STA\.?/i.test(raw) || raw.includes("+") || raw.includes("＋");
-    // parseSta100 accepts plain numeric too; for row scoring we keep isStaLike
+    const isStaLike = /STA\.?/i.test(raw) || raw.includes("+") || raw.includes("＋") || /^STA-?\d+$/i.test(raw);
     try {
       const m = parseSta100(raw.replace(/＋/g,"+"));
       return Number.isFinite(m) ? {m, isStaLike} : null;
@@ -1093,32 +1093,57 @@ function dxfBuildProfileFromBoxTable(dxfText){
     }
   };
 
+  const staCellsFromRow = (items)=>{
+    const its = items.slice().sort((a,b)=>a.x-b.x);
+    const cells = [];
+    // 1) standalone parses
+    for (const it of its){
+      const p = tryParseStaToken(it.text);
+      if (p) cells.push({x:it.x,y:it.y,raw:it.text,m:p.m,isStaLike:p.isStaLike});
+    }
+    // 2) "STA-1" + "-20.000" pairing (often two separate TEXT entities)
+    for (let i=0;i<its.length-1;i++){
+      const left = String(its[i].text||"").trim().replace(/[　\s]+/g,"").replace(/[－−–—]/g,"-");
+      const rightRaw = String(its[i+1].text||"").trim().replace(/[　\s]+/g,"").replace(/[－−–—]/g,"-");
+      const mSta = left.match(/^STA(-?\d+)$/i);
+      if (!mSta) continue;
+      // right should be signed number (e.g. -20.000)
+      if (!/^[+-]?\d+(?:\.\d+)?$/.test(rightRaw)) continue;
+      const k = parseNumLoose(mSta[1]);
+      const rem = parseNumLoose(rightRaw);
+      if (!Number.isFinite(k) || !Number.isFinite(rem)) continue;
+      const mVal = k*100 + rem; // rem may be negative (e.g. -20)
+      cells.push({x:(its[i].x+its[i+1].x)/2, y:its[i].y, raw:`STA${mSta[1]} ${rightRaw}`, m:mVal, isStaLike:true});
+    }
+    // dedupe by x+value roughly
+    cells.sort((a,b)=>a.x-b.x);
+    const out = [];
+    for (const c of cells){
+      const last = out[out.length-1];
+      if (last && Math.abs(last.m - c.m) < 1e-6 && Math.abs(last.x - c.x) < 1e-3) continue;
+      out.push(c);
+    }
+    return out;
+  };
+
   let bestStaRow = null;
   let bestScore = -Infinity;
 
   for (const [yKey, items] of rowMap.entries()){
-    const cells = [];
-    let staLikeCount = 0;
-    for (const it of items){
-      const p = tryParseStaToken(it.text);
-      if (!p) continue;
-      cells.push({x:it.x, y:it.y, raw:it.text, m:p.m, isStaLike:p.isStaLike});
-      if (p.isStaLike) staLikeCount++;
-    }
+    const cells = staCellsFromRow(items);
+    const staLikeCount = cells.reduce((acc,c)=>acc+(c.isStaLike?1:0),0);
     if (cells.length < 3) continue;
-
-    // Score: prefer many parsable + many explicit STA-like tokens
+    // prefer rows with many explicit STA-like tokens (not just plain numbers)
     const score = cells.length*10 + staLikeCount*30;
     if (score > bestScore){
       bestScore = score;
-      bestStaRow = {y0:yKey, cells: cells.sort((a,b)=>a.x-b.x)};
+      bestStaRow = {y0:yKey, cells: cells};
     }
   }
 
-  if (!bestStaRow) throw new Error("箱書きの『測点(STA)』行が見つかりません（0+0.000 や STA2+0.000 等の測点表記が必要です）");
+  if (!bestStaRow) throw new Error("箱書きの『測点(STA)』行が見つかりません（例：0+0.000 / STA2+0.000 / STA-1 -20.000 等）");
 
   // --- Z row detection ---
-  // Prefer label-based, but allow synonyms (計画高/計画標高/表層/路面)
   const rowZ_byLabel = findRowNearLabel(textsAll, /計画\s*(?:高|標高)|計画(?:高|標高)|表層|路面/i);
   let rowZ = rowZ_byLabel;
 
@@ -1170,7 +1195,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
 
   if (pts.length < 2) throw new Error("箱書きからSTA・計画高の点が十分に取れません");
 
-  // --- Resample by PWA staPitch (A: 測点表示ピッチ) ---
+  // --- Resample by PWA staPitch (A: 測点表示ピッチ) aligned to grid ---
   const pitch = Math.max(1, Math.floor(state.staPitch||1));
   const sMin = pts[0].sta;
   const sMax = pts[pts.length-1].sta;
@@ -1178,7 +1203,6 @@ function dxfBuildProfileFromBoxTable(dxfText){
   const interpZ = (s)=>{
     if (s <= pts[0].sta) return pts[0].z;
     if (s >= pts[pts.length-1].sta) return pts[pts.length-1].z;
-    // find segment (linear scan; pts count is small)
     for (let i=0;i<pts.length-1;i++){
       const a=pts[i], b=pts[i+1];
       if (s >= a.sta && s <= b.sta){
@@ -1190,23 +1214,32 @@ function dxfBuildProfileFromBoxTable(dxfText){
   };
 
   const samples = [];
-  let s = sMin;
-  // keep original start
-  samples.push({sta:sMin, z: interpZ(sMin)});
-  // advance by pitch from start
-  while (s + pitch < sMax - 1e-9){
-    s = s + pitch;
-    samples.push({sta:+s.toFixed(3), z: interpZ(s)});
+  const roundSta = (v)=> +(+v).toFixed(3);
+  const roundZ   = (v)=> +(+v).toFixed(3);
+
+  // grid-aligned stations (multiples of pitch) within range, plus exact endpoints
+  const g0 = Math.floor(sMin / pitch) * pitch;
+  const g1 = Math.ceil(sMax / pitch) * pitch;
+
+  // include exact start
+  samples.push({sta: roundSta(sMin), z: roundZ(interpZ(sMin))});
+
+  for (let s=g0; s<=g1+1e-9; s+=pitch){
+    if (s <= sMin + 1e-9) continue;
+    if (s >= sMax - 1e-9) continue;
+    samples.push({sta: roundSta(s), z: roundZ(interpZ(s))});
   }
+
+  // include exact end
   if (Math.abs(samples[samples.length-1].sta - sMax) > 1e-6){
-    samples.push({sta:+sMax.toFixed(3), z: interpZ(sMax)});
+    samples.push({sta: roundSta(sMax), z: roundZ(interpZ(sMax))});
   }
+
+  samples.sort((a,b)=>a.sta-b.sta);
 
   // build grades (merge same grade)
   const grades = [];
   let gid = 1;
-
-  const roundSta = (v)=> +(+v).toFixed(3);
   const roundG  = (v)=> +(+v).toFixed(6);
 
   for (let i=0;i<samples.length-1;i++){
@@ -1219,14 +1252,13 @@ function dxfBuildProfileFromBoxTable(dxfText){
 
     const last = grades[grades.length-1];
     if (last && Math.abs(last.gradePct - gR) < 1e-6){
-      // extend
       last.nextSta = nextSta;
     } else {
       grades.push({ id: gid++, nextSta, gradePct: gR });
     }
   }
 
-  return { startSta: roundSta(samples[0].sta), startZ: +(+samples[0].z).toFixed(3), grades };
+  return { startSta: roundSta(samples[0].sta), startZ: roundZ(samples[0].z), grades };
 }
 
 function dxfFindStaListNearCL(dxfText){
@@ -1991,23 +2023,30 @@ const parseNumLoose = (v) => {
 
 // Parse station input in 100m-major style (e.g., "STA2+12.651" => 212.651m)
 // Also accepts plain meters ("212.651") and "STA.-1-20" style.
+// Parse station tokens in 100m notation.
+// Examples: "2+12.651" => 212.651m, "-0+20.000" => -20.000m, "-1+20.000" => -120.000m
+// Also accepts plain meters ("212.651") and "-1-20" style (= -120.000m).
 const parseSta100 = (token) => {
   let s = String(token ?? "").trim();
   if (!s) throw new Error("STAが空です");
-  s = s.replace(/[mMｍＭ]\s*$/, "").trim();
+  // normalize symbols / spaces
+  s = s.replace(/[　\s]+/g, "").replace(/＋/g, "+").replace(/[－−–—]/g, "-");
+  s = s.replace(/[mMｍＭ]$/, "").trim();
   s = s.replace(/^STA\.?/i, "").trim();
 
-  // allow "2+12.651"
+  // allow "2+12.651" (and negative K like "-1+20" => -120)
   if (s.includes("+")) {
     const [a,b] = s.split("+",2);
-    const k = parseNumLoose(a);
+    const aRaw = String(a ?? "");
+    const k = parseNumLoose(aRaw);
     const rem = parseNumLoose(b);
     if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("STA形式が不正です");
-    return k*100 + rem;
+    const isNeg = aRaw.startsWith("-"); // handles -0
+    return (isNeg ? (k*100 - rem) : (k*100 + rem));
   }
 
   // allow "-1-20" (meaning -100 - 20)
-  const m = s.match(/^(-?\d+(?:\.\d+)?)[-－−](\d+(?:\.\d+)?)$/);
+  const m = s.match(/^(-?\d+(?:\.\d+)?)-(?:(\d+(?:\.\d+)?))$/);
   if (m) {
     const k = parseNumLoose(m[1]);
     const rem = parseNumLoose(m[2]);
@@ -7684,5 +7723,46 @@ function buildExportFileName(kind){
 }
 
 </script>
+
+<datalist id="staAllList"></datalist>
+<script>
+(function(){
+  // populate datalist with grid stations based on current settings + existing grade endpoints
+  const fillStaList = ()=>{
+    const dl = document.getElementById("staAllList");
+    if (!dl) return;
+    const pitch = Math.max(1, Math.floor((window.state?.staPitch)||1));
+    const vals = new Set();
+    try{
+      const p = window.state?.profile;
+      if (p){
+        vals.add(+p.startSta||0);
+        for (const g of (p.grades||[])){
+          if (Number.isFinite(+g.nextSta)) vals.add(+g.nextSta);
+        }
+      }
+      const planLen = window.state?.plan?.totalLen;
+      if (Number.isFinite(+planLen)){
+        const min = Math.min(0, ...Array.from(vals));
+        const max = Math.max(+planLen, ...Array.from(vals));
+        const g0 = Math.floor(min/pitch)*pitch;
+        const g1 = Math.ceil(max/pitch)*pitch;
+        for (let s=g0; s<=g1+1e-9; s+=pitch){
+          vals.add(+s.toFixed(3));
+        }
+      }
+    }catch(e){}
+    const arr = Array.from(vals).filter(v=>Number.isFinite(v)).sort((a,b)=>a-b);
+    dl.innerHTML = "";
+    for (const v of arr){
+      const o = document.createElement("option");
+      o.value = v.toFixed(3);
+      dl.appendChild(o);
+    }
+  };
+  window.__FILL_STA_LIST__ = fillStaList;
+})();
+</script>
+
 </body>
 </html>
