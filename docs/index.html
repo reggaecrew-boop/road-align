@@ -11,7 +11,7 @@
   <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.3";
+    window.APP_VERSION = "18.10.9";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -565,37 +565,106 @@ async function readLocalFileText(file){
   return tryDec("utf-8") || tryDec("shift_jis") || new TextDecoder().decode(u8);
 }
 
+function asObjectFromJsonText(txt){
+  try { return JSON.parse(txt); } catch(e){ return null; }
+}
+function applyPlanFromJsonObject(obj){
+  const src = (obj && typeof obj === "object") ? obj : null;
+  if (!src) throw new Error("JSONが不正です。");
+  // full state or partial
+  const o = src.bp || src.ep || src.ipPoints ? src : (src.plan || src);
+  if (o.bp) state.bp = o.bp;
+  if (o.ep) state.ep = o.ep;
+  if (Array.isArray(o.ipPoints)){ state.ipPoints = o.ipPoints; state.useIpCount = (typeof o.useIpCount==="number") ? o.useIpCount : o.ipPoints.length; }
+  // curve settings are optional; safest is clear if mismatch
+  state.curveSettings = Array.isArray(o.curveSettings) ? o.curveSettings : [];
+}
+function applyProfileFromJsonObject(obj){
+  const src = (obj && typeof obj === "object") ? obj : null;
+  if (!src) throw new Error("JSONが不正です。");
+  const p = src.profile ? src.profile : src;
+  if (!p || typeof p !== "object") throw new Error("profileが見つかりません。");
+  state.profile = p;
+}
+function applyCrossFromJsonObject(obj){
+  const src = (obj && typeof obj === "object") ? obj : null;
+  if (!src) throw new Error("JSONが不正です。");
+  const c = src.cross ? src.cross : src;
+  if (!c || typeof c !== "object") throw new Error("crossが見つかりません。");
+  // preserve UI fields if not provided
+  const prevUi = state.cross && state.cross.ui ? state.cross.ui : null;
+  state.cross = c;
+  if (prevUi && (!state.cross.ui)) state.cross.ui = prevUi;
+}
+
+
 /* =======================
    DXF IMPORT (ASCII DXF)
+
+// --- DXF import runtime policy ---
+const DXF_SMARTPHONE_MAX_BYTES = 25 * 1024 * 1024; // 25MB
+function isSmartphoneDevice(){
+  const ua = (navigator && navigator.userAgent) ? navigator.userAgent : "";
+  return /iPhone|iPod|Android/i.test(ua);
+}
+function enforceDxfSizeLimit(file, msgEl){
+  if (!file) return false;
+  if (isSmartphoneDevice() && file.size > DXF_SMARTPHONE_MAX_BYTES){
+    const mb = (file.size / 1024 / 1024).toFixed(1);
+    if (msgEl){
+      msgEl.textContent =
+        `DXFが大きすぎます（${mb}MB）。スマホ解析は25MB以下にしてください。` +
+        `\nPCでDXFを解析して、解析済みJSONを読み込む運用が安全です。`;
+    } else {
+      alert(`DXFが大きすぎます（${mb}MB）。スマホ解析は25MB以下にしてください。`);
+    }
+    return false;
+  }
+  return true;
+}
+
    ======================= */
 
-function dxfParsePairs(text){
+// NOTE(iOS対策): 大きいDXFで lines.split() をするとメモリが跳ねて
+// Safariがタブごとリロード（白画面→戻る）することがある。
+// そこで、ペア配列を作らずに1パスで走査できるイテレータを用意する。
+function dxfForEachPair(text, fn){
   // ASCII DXF is: <groupCode>\n<value>\n repeating.
-  const lines = String(text||"").replace(/\r\n/g,"\n").replace(/\r/g,"\n").split("\n");
-  const pairs = [];
-  for (let i=0; i<lines.length-1; i+=2){
-    const code = String(lines[i]||"").trim();
-    const val = lines[i+1] ?? "";
-    if (code === "") continue;
-    pairs.push([code, val]);
+  const s0 = String(text||"").replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+  let i = 0;
+  const n = s0.length;
+  while (i < n){
+    let j = s0.indexOf("\n", i);
+    if (j < 0) break;
+    const code = s0.slice(i, j).trim();
+    i = j + 1;
+    j = s0.indexOf("\n", i);
+    if (j < 0) break;
+    const val = s0.slice(i, j);
+    i = j + 1;
+    if (code !== "") fn(code, val);
   }
+}
+
+// 互換用（小さなDXF向け）: 既存ロジックが必要な場所ではこれを使える。
+function dxfParsePairs(text){
+  const pairs = [];
+  dxfForEachPair(text, (code,val)=>pairs.push([code,val]));
   return pairs;
 }
 
 function dxfExtractTextLike(text){
-  const pairs = dxfParsePairs(text);
   const kinds = new Set(["TEXT","MTEXT","ATTRIB","DIMENSION"]);
   const out = [];
   let cur = null;
-  for (let i=0;i<pairs.length;i++){
-    const [code, val] = pairs[i];
+  dxfForEachPair(text, (code,val)=>{
     if (code === "0"){
       if (cur && cur.text) out.push(cur);
       if (kinds.has(val)) cur = { etype: val, layer:"", x:null, y:null, h:null, text:"" };
       else cur = null;
-      continue;
+      return;
     }
-    if (!cur) continue;
+    if (!cur) return;
     if (code === "8") cur.layer = val;
     else if (code === "10") cur.x = parseFloat(val);
     else if (code === "20") cur.y = parseFloat(val);
@@ -604,7 +673,7 @@ function dxfExtractTextLike(text){
       if (cur.etype === "MTEXT") cur.text += val;
       else if (code === "1") cur.text += val;
     }
-  }
+  });
   if (cur && cur.text) out.push(cur);
 
   const clean = (s)=>String(s||"")
@@ -625,23 +694,21 @@ function dxfExtractTextLike(text){
 }
 
 function dxfExtractLwPolylines(text){
-  const pairs = dxfParsePairs(text);
   const out = [];
   let cur = null;
-  for (let i=0;i<pairs.length;i++){
-    const [code,val] = pairs[i];
+  dxfForEachPair(text, (code,val)=>{
     if (code === "0"){
       if (cur) out.push(cur);
       if (val === "LWPOLYLINE") cur = { layer:"", xs:[], ys:[], flags:0 };
       else cur = null;
-      continue;
+      return;
     }
-    if (!cur) continue;
+    if (!cur) return;
     if (code === "8") cur.layer = val;
     else if (code === "10") cur.xs.push(parseFloat(val));
     else if (code === "20") cur.ys.push(parseFloat(val));
     else if (code === "70") cur.flags = parseInt(val,10)||0;
-  }
+  });
   if (cur) out.push(cur);
   return out.map(p=>{
     const n = Math.min(p.xs.length, p.ys.length);
@@ -1714,6 +1781,31 @@ const downloadText = (text, filename, mime="text/plain;charset=utf-8") => {
   a.download = filename;
   a.click();
 };
+
+/* =========================
+   Tab JSON Export helpers
+   ========================= */
+function exportPlanJson(){
+  const obj = {
+    meta: { kind: "plan", version: String(window.APP_VERSION||"") },
+    bp: state.bp,
+    ep: state.ep,
+    ipPoints: state.ipPoints,
+    useIpCount: state.useIpCount,
+    curveSettings: Array.isArray(state.curveSettings) ? state.curveSettings : []
+  };
+  downloadText(JSON.stringify(obj, null, 2), buildExportFileName("plan"), "application/json;charset=utf-8");
+}
+function exportProfileJson(){
+  const obj = { meta: { kind: "profile", version: String(window.APP_VERSION||"") }, profile: state.profile };
+  downloadText(JSON.stringify(obj, null, 2), buildExportFileName("profile"), "application/json;charset=utf-8");
+}
+function exportCrossJson(){
+  const obj = { meta: { kind: "cross", version: String(window.APP_VERSION||"") }, cross: state.cross };
+  downloadText(JSON.stringify(obj, null, 2), buildExportFileName("cross"), "application/json;charset=utf-8");
+}
+
+
 
 /* =========================
    v18: Plan export (SIMA/XRF) + Design elevation query
@@ -4313,9 +4405,9 @@ const render = () => {
       <h2>平面線形の読み込み（DXF）</h2>
       <div class="grid grid-2">
         <div>
-          <label>ファイル（ASCII DXF .dxf）</label>
+          <label>ファイル（ASCII DXF .dxf）<span class="mini">（スマホは25MB以下推奨／PCは大容量可）</span></label>
           <input id="planDxfFile" type="file" accept=".dxf,text/plain" />
-          <div class="mini">平面図（003～008）想定。中心線（LWPOLYLINE）を探索してBP/EP/IPを作成します。橋梁(A1/A2/P1…のラベル)も見つけた場合は、橋梁区間のSTAに横断⑥を割当します。</div>
+          <div class="mini">平面図（003～008）想定。中心線（LWPOLYLINE）を探索してBP/EP/IPを作成します。橋梁(A1/A2/P1…のラベル)も見つけた場合は、橋梁区間のSTAに横断⑥を割当します。<br/>※DXF解析はPC推奨（スマホは25MB以下）。</div>
         </div>
         <div>
           <label>読み込み</label>
@@ -4324,6 +4416,21 @@ const render = () => {
         </div>
       </div>
     </div>
+
+<div class="grid grid-2" style="margin-top:10px;">
+  <div>
+    <label>解析済みJSON（平面だけ / 全stateでもOK）</label>
+    <input id="planJsonFile" type="file" accept="application/json" />
+    <div class="mini">BP/EP/IP座標やIP点列などをJSONから反映します（現場ではDXF解析をPCで行い、スマホはJSONを読み込む運用が推奨）。</div>
+  </div>
+  <div>
+    <label>読み込み</label>
+    <button class="btn btn-ok" id="btnPlanJsonImport">JSONを反映</button>
+    <button class="btn" id="btnPlanJsonExport">平面JSONを書き出し</button>
+    <div id="planJsonMsg" class="mini" style="margin-top:8px;"></div>
+  </div>
+</div>
+
 
     <div class="card" id="secCoordCatalog">
       <h2>座標一覧（CSV）</h2>
@@ -4629,6 +4736,15 @@ const render = () => {
       try{
         const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
         if (!file){ if (msg) msg.textContent = "DXFファイルを選択してください。"; return; }
+
+        // スマホは大容量DXFで落ちやすい（iOS白飛び/強制リロード対策）
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent||"");
+        const LIMIT = 25 * 1024 * 1024; // 25MB
+        if (isMobile && file.size > LIMIT){
+          const mb = (file.size/1024/1024).toFixed(1);
+          if (msg) msg.textContent = `DXFが${mb}MBあります。スマホ解析は25MB以下にしてください（PCで解析→JSON化して読み込む運用が安全です）。`;
+          return;
+        }
         if (msg) msg.textContent = "DXF解析中…";
         const dxfText = await readLocalFileText(file);
 
@@ -4688,8 +4804,66 @@ const render = () => {
         if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
       }
     };
-  })();
+  })()
+/* Plan JSON import bind */
+(function(){
+  const fi = document.getElementById("planJsonFile");
+  const btn = document.getElementById("btnPlanJsonImport");
+  const msg = document.getElementById("planJsonMsg");
+  if (!fi || !btn) return;
+  btn.onclick = async ()=>{
+    try{
+      const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+      if (!file){ if (msg) msg.textContent = "JSONファイルを選択してください。"; return; }
+      if (msg) msg.textContent = "JSON読み込み中…";
+      const txt = await readLocalFileText(file);
+      const obj = asObjectFromJsonText(txt);
+      if (!obj) throw new Error("JSONの解析に失敗しました。");
+      applyPlanFromJsonObject(obj);
+      // 反映後に整合を取る
+      state.curveSettings = []; // 旧設定でコケるのを防止（必要なら後で復元）
+      saveState();
+      render();
+      if (msg) msg.textContent = "JSONを平面に反映しました。";
+    }catch(e){
+      if (msg) msg.textContent = `JSON読み込みエラー：${e && e.message ? e.message : e}`;
+    }
+  };
+})();
 
+;
+
+
+  /* Plan JSON import bind (partial apply: plan only) */
+  (function(){
+    const fi = document.getElementById("planJsonFile");
+    const btn = document.getElementById("btnPlanJsonImport");
+    const msg = document.getElementById("planJsonMsg");
+    if (!fi || !btn) return;
+    btn.onclick = async ()=>{
+      try{
+        const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+        if (!file){ if (msg) msg.textContent = 'JSONファイルを選択してください。'; return; }
+        if (msg) msg.textContent = 'JSON読込中…';
+        const text = await readLocalFileText(file);
+        const obj = JSON.parse(text);
+        const src = (obj && obj.projectName && obj.bp) ? obj : (obj && obj.state ? obj.state : obj);
+        if (!src || !src.bp || !src.ep){ throw new Error('このJSONに平面（bp/ep）が見つかりません。'); }
+        state.bp = cloneDeep(src.bp);
+        state.ep = cloneDeep(src.ep);
+        if (Array.isArray(src.ipPoints)){
+          state.ipPoints = cloneDeep(src.ipPoints);
+          state.useIpCount = state.ipPoints.length;
+        }
+        // 曲線設定は、IP点の整合が取れない場合が多いので基本クリア（必要なら後で再設定）
+        state.curveSettings = Array.isArray(src.curveSettings) ? cloneDeep(src.curveSettings) : [];
+        saveState(); render();
+        if (msg) msg.textContent = `反映OK：平面JSON（IP ${state.ipPoints.length}点）`;
+      }catch(e){
+        if (msg) msg.textContent = `JSON読み込みエラー：${e && e.message ? e.message : e}`;
+      }
+    };
+  })();
 
 
   /* Coord catalog bind */
@@ -5073,7 +5247,7 @@ viewProfile.innerHTML = `
       <div>
         <label>縦断図DXF（ASCII .dxf）</label>
         <input id="profileDxfFile" type="file" accept=".dxf,text/plain" />
-        <div class="mini">箱書き表（累加距離×計画高）を探索し、縦断（startSta/startZ + grades）へ自動反映します。</div>
+        <div class="mini">箱書き表（累加距離×計画高）を探索し、縦断（startSta/startZ + grades）へ自動反映します。<br/>※DXF解析はPC推奨（スマホは25MB以下）。</div>
       </div>
       <div>
         <label>読み込み</label>
@@ -5081,6 +5255,21 @@ viewProfile.innerHTML = `
         <div id="profileDxfMsg" class="mini" style="margin-top:8px;"></div>
       </div>
     </div>
+<div class="grid grid-2" style="margin-top:10px;">
+  <div>
+    <label>解析済みJSON（縦断だけ / 全stateでもOK）</label>
+    <input id="profileJsonFile" type="file" accept="application/json" />
+    <div class="mini">profile（startSta/startZ/grades/vcurves）をJSONから反映します。</div>
+  </div>
+  <div>
+    <label>読み込み</label>
+    <button class="btn btn-ok" id="btnProfileJsonImport">JSONを反映</button>
+    <button class="btn" id="btnProfileJsonExport">縦断JSONを書き出し</button>
+    <div id="profileJsonMsg" class="mini" style="margin-top:8px;"></div>
+  </div>
+</div>
+
+
 
     <div class="grid grid-4">
       <div>
@@ -5273,6 +5462,16 @@ document.getElementById("profEnabled").onchange = (e)=>{ state.profile.enabled =
     try{
       const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
       if (!file){ if (msg) msg.textContent = 'DXFファイルを選択してください。'; return; }
+
+
+      // スマホは大容量DXFで落ちやすい（iOS白飛び/強制リロード対策）
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent||"");
+      const LIMIT = 25 * 1024 * 1024; // 25MB
+      if (isMobile && file.size > LIMIT){
+        const mb = (file.size/1024/1024).toFixed(1);
+        if (msg) msg.textContent = `DXFが${mb}MBあります。スマホ解析は25MB以下にしてください（PCで解析→JSON化して読み込む運用が安全です）。`;
+        return;
+      }
       if (msg) msg.textContent = 'DXF解析中…';
       const dxfText = await readLocalFileText(file);
       const pr = dxfBuildProfileFromBoxTable(dxfText);
@@ -5293,7 +5492,32 @@ document.getElementById("profEnabled").onchange = (e)=>{ state.profile.enabled =
       if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
     }
   };
+})()
+/* Profile JSON import bind */
+(function(){
+  const fi = document.getElementById('profileJsonFile');
+  const btn = document.getElementById('btnProfileJsonImport');
+  const msg = document.getElementById('profileJsonMsg');
+  if (!fi || !btn) return;
+  btn.onclick = async ()=>{
+    try{
+      const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+      if (!file){ if (msg) msg.textContent = 'JSONファイルを選択してください。'; return; }
+      if (msg) msg.textContent = 'JSON読み込み中…';
+      const txt = await readLocalFileText(file);
+      const obj = asObjectFromJsonText(txt);
+      if (!obj) throw new Error('JSONの解析に失敗しました。');
+      applyProfileFromJsonObject(obj);
+      saveState();
+      render();
+      if (msg) msg.textContent = 'JSONを縦断に反映しました。';
+    }catch(e){
+      if (msg) msg.textContent = `JSON読み込みエラー：${e && e.message ? e.message : e}`;
+    }
+  };
 })();
+
+;
 const inStartSta = document.getElementById("startSta");
   const commitStartSta = ()=>{
     const t = String(inStartSta.value ?? "").trim();
@@ -5623,7 +5847,7 @@ const cr = computeCrossSide("common", "right");
         <div>
           <label>標準横断DXF（ASCII .dxf）</label>
           <input id="crossDxfFile" type="file" accept=".dxf,text/plain" />
-          <div class="mini">標準横断図（4/5/6など）で、CL付近のSTA表記を拾って測点別例外に登録します。橋梁区間の“共通断面（⑥）”は平面DXF読込で割当するのが基本です。</div>
+          <div class="mini">標準横断図（4/5/6など）で、CL付近のSTA表記を拾って測点別例外に登録します。橋梁区間の“共通断面（⑥）”は平面DXF読込で割当するのが基本です。<br/>※DXF解析はPC推奨（スマホは25MB以下）。</div>
         </div>
         <div>
           <label>読み込み</label>
@@ -5631,6 +5855,21 @@ const cr = computeCrossSide("common", "right");
           <div id="crossDxfMsg" class="mini" style="margin-top:8px;"></div>
         </div>
       </div>
+<div class="grid grid-2" style="margin-top:10px;">
+  <div>
+    <label>解析済みJSON（横断だけ / 全stateでもOK）</label>
+    <input id="crossJsonFile" type="file" accept="application/json" />
+    <div class="mini">cross（right/left/overridesなど）をJSONから反映します。</div>
+  </div>
+  <div>
+    <label>読み込み</label>
+    <button class="btn btn-ok" id="btnCrossJsonImport">JSONを反映</button>
+    <button class="btn" id="btnCrossJsonExport">横断JSONを書き出し</button>
+    <div id="crossJsonMsg" class="mini" style="margin-top:8px;"></div>
+  </div>
+</div>
+
+
 
       <div class="row" style="margin-top:10px;">
         <div style="width:200px;">
@@ -5935,6 +6174,16 @@ const cr = computeCrossSide("common", "right");
       try{
         const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
         if (!file){ if (msg) msg.textContent = 'DXFファイルを選択してください。'; return; }
+
+
+      // スマホは大容量DXFで落ちやすい（iOS白飛び/強制リロード対策）
+      const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent||"");
+      const LIMIT = 25 * 1024 * 1024; // 25MB
+      if (isMobile && file.size > LIMIT){
+        const mb = (file.size/1024/1024).toFixed(1);
+        if (msg) msg.textContent = `DXFが${mb}MBあります。スマホ解析は25MB以下にしてください（PCで解析→JSON化して読み込む運用が安全です）。`;
+        return;
+      }
         if (msg) msg.textContent = 'DXF解析中…';
         const dxfText = await readLocalFileText(file);
         const name = String(file.name||"");
@@ -5974,7 +6223,60 @@ const cr = computeCrossSide("common", "right");
         if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
       }
     };
+  })()
+/* Cross JSON import bind */
+(function(){
+  const fi = document.getElementById('crossJsonFile');
+  const btn = document.getElementById('btnCrossJsonImport');
+  const msg = document.getElementById('crossJsonMsg');
+  if (!fi || !btn) return;
+  btn.onclick = async ()=>{
+    try{
+      const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+      if (!file){ if (msg) msg.textContent = 'JSONファイルを選択してください。'; return; }
+      if (msg) msg.textContent = 'JSON読み込み中…';
+      const txt = await readLocalFileText(file);
+      const obj = asObjectFromJsonText(txt);
+      if (!obj) throw new Error('JSONの解析に失敗しました。');
+      applyCrossFromJsonObject(obj);
+      saveState();
+      render();
+      if (msg) msg.textContent = 'JSONを横断に反映しました。';
+    }catch(e){
+      if (msg) msg.textContent = `JSON読み込みエラー：${e && e.message ? e.message : e}`;
+    }
+  };
+})();
+
+;
+
+  /* Cross JSON import bind (partial apply: cross only) */
+  (function(){
+    const fi = document.getElementById("crossJsonFile");
+    const btn = document.getElementById("btnCrossJsonImport");
+    const msg = document.getElementById("crossJsonMsg");
+    if (!fi || !btn) return;
+    btn.onclick = async ()=>{
+      try{
+        const file = (fi.files && fi.files[0]) ? fi.files[0] : null;
+        if (!file){ if (msg) msg.textContent = 'JSONファイルを選択してください。'; return; }
+        if (msg) msg.textContent = 'JSON読込中…';
+        const text = await readLocalFileText(file);
+        const obj = JSON.parse(text);
+        const src = (obj && obj.cross) ? obj : (obj && obj.state ? obj.state : obj);
+        if (!src || !src.cross){ throw new Error('このJSONに横断（cross）が見つかりません。'); }
+        // uiは維持して、共通断面/overrides等を更新
+        const keepUi = state.cross && state.cross.ui ? cloneDeep(state.cross.ui) : null;
+        state.cross = cloneDeep(src.cross);
+        if (keepUi) state.cross.ui = keepUi;
+        saveState(); render();
+        if (msg) msg.textContent = `反映OK：横断JSON（override ${Object.keys(state.cross.overrides||{}).length}件）`;
+      }catch(e){
+        if (msg) msg.textContent = `JSON読み込みエラー：${e && e.message ? e.message : e}`;
+      }
+    };
   })();
+
 
   // 一括距離
   const bulkBtn = document.getElementById("applyBulkCrossEnd");
@@ -7158,6 +7460,50 @@ document.querySelectorAll("[data-jump]").forEach(btn=>{
 })();
 
 render();
+
+
+/* Tab JSON export bind */
+(function(){
+  const b1=document.getElementById("btnPlanJsonExport");
+  if (b1) b1.onclick = ()=>{ try{ exportPlanJson(); }catch(e){ alert("平面JSON書き出しエラー："+(e&&e.message?e.message:e)); } };
+  const b2=document.getElementById("btnProfileJsonExport");
+  if (b2) b2.onclick = ()=>{ try{ exportProfileJson(); }catch(e){ alert("縦断JSON書き出しエラー："+(e&&e.message?e.message:e)); } };
+  const b3=document.getElementById("btnCrossJsonExport");
+  if (b3) b3.onclick = ()=>{ try{ exportCrossJson(); }catch(e){ alert("横断JSON書き出しエラー："+(e&&e.message?e.message:e)); } };
+})();
+
+
+
+// ---- filename helper (prompt + timestamp) ----
+function _sanitizeFilePart(s){
+  return String(s || "")
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, "_")
+    .replace(/\s+/g, "_")
+    .slice(0, 80) || "project";
+}
+function _tsCompact(){
+  const d = new Date();
+  const pad = (n)=>String(n).padStart(2,"0");
+  return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+function _getDefaultExportBase(){
+  try{
+    const last = localStorage.getItem("lastExportBaseName") || "";
+    if(last.trim()) return last.trim();
+  }catch(e){}
+  return (state && state.projectName) ? String(state.projectName) : "";
+}
+function buildExportFileName(kind){
+  // kind: 'plan' | 'profile' | 'cross' | 'state'
+  const defBase = _getDefaultExportBase();
+  const input = window.prompt("書き出しファイル名（先頭）を入力してね\n例）現場名_工区名", defBase);
+  const base = _sanitizeFilePart((input==null ? defBase : input));
+  try{ localStorage.setItem("lastExportBaseName", base); }catch(e){}
+  return `${base}_${kind}_${_tsCompact()}.json`;
+}
+_${kind}_${_tsCompact()}.json`;
+}
 
 </script>
 </body>
