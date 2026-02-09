@@ -11,7 +11,7 @@
   <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.0";
+    window.APP_VERSION = "18.10.2";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -761,6 +761,186 @@ function dxfBuildPlanFromCenterline(dxfText){
   const ep = pts[pts.length-1];
   const ips = pts.slice(1, pts.length-1);
   return { bp, ep, ips, clPts: pts };
+}
+
+// 図面の座標系が「現場座標として設定されている」かの簡易判定。
+// DXFは必ず数値座標を持つが、(0,0)近傍のローカル座標は「座標設定なし」扱いにする。
+function dxfIsLikelyGeoreferenced(pts){
+  if (!Array.isArray(pts) || pts.length < 2) return false;
+  let maxAbs = 0;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of pts){
+    if (!p || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) continue;
+    const x = +p[0], y = +p[1];
+    maxAbs = Math.max(maxAbs, Math.abs(x), Math.abs(y));
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  }
+  const span = Math.max(maxX-minX, maxY-minY);
+  // spanが極端に小さい図は対象外（誤抽出）
+  if (!Number.isFinite(span) || span < 10) return false;
+  // 日本の平面直角座標系などは概ね 1e4〜1e6 オーダー。ローカル図面は数百〜数千に収まることが多い。
+  return maxAbs >= 10000;
+}
+
+// ---- Plan control points (BP/EP/IP) from coordinate texts ----
+// DXFの図面上に BP/EP/IP の座標（E/N または X/Y）を文字として記載してある前提で、
+// その数値を読み取り state.bp/state.ep/state.ipPoints に反映する。
+// 座標が見つからない場合は null を返す（呼び出し側でメッセージ表示）。
+function dxfDetectCoordConvention(texts){
+  // global hint: does the drawing use X/Y or E/N
+  const all = texts.map(t=>String(t.text||'')).join('\n');
+  if (/[XＸ]\s*[:=]/i.test(all) || /\bX\b/i.test(all)) return 'XY';
+  if (/[EＥ]\s*[:=]/i.test(all) || /\bE\b/i.test(all)) return 'EN';
+  if (/[NＮ]\s*[:=]/i.test(all) || /\bN\b/i.test(all)) return 'EN';
+  return 'UNKNOWN';
+}
+
+function dxfParseCoordInline(text){
+  const s = String(text||'')
+    .replace(/[\uFF0B]/g,'+')
+    .replace(/[\uFF0D]/g,'-')
+    .replace(/[\uFF1A]/g,':')
+    .replace(/[\uFF1D]/g,'=')
+    .replace(/[\u3000]/g,' ');
+  // E/N style
+  const mE = s.match(/(?:\bE\b|Ｅ|EAST|EASTING)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)/i);
+  const mN = s.match(/(?:\bN\b|Ｎ|NORTH|NORTHING)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)/i);
+  // X/Y style (common: X=Northing, Y=Easting)
+  const mX = s.match(/(?:\bX\b|Ｘ)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)/i);
+  const mY = s.match(/(?:\bY\b|Ｙ)\s*[:=]?\s*([+-]?\d+(?:\.\d+)?)/i);
+  const out = {};
+  if (mE) out.E = parseFloat(mE[1]);
+  if (mN) out.N = parseFloat(mN[1]);
+  if (mX) out.X = parseFloat(mX[1]);
+  if (mY) out.Y = parseFloat(mY[1]);
+  if ([out.E,out.N,out.X,out.Y].some(v=>Number.isFinite(v))) return out;
+  return null;
+}
+
+function dxfDist(a,b){
+  const dx = (a.x||0) - (b.x||0);
+  const dy = (a.y||0) - (b.y||0);
+  return Math.hypot(dx,dy);
+}
+
+function dxfFindNearbyText(texts, ref, radius){
+  const r = radius||60;
+  return texts
+    .filter(t=>Number.isFinite(t.x)&&Number.isFinite(t.y))
+    .map(t=>({t, d:dxfDist(t, ref)}))
+    .filter(o=>o.d>0 && o.d<=r)
+    .sort((a,b)=>a.d-b.d)
+    .map(o=>o.t);
+}
+
+function dxfIsNumberOnly(text){
+  return /^[+-]?\d+(?:\.\d+)?$/.test(String(text||'').trim());
+}
+
+function dxfLabelToIpIndex(label){
+  const s = String(label||'').toUpperCase().replace(/\s+/g,'');
+  // IP1, IP-1, IP(1)
+  const m = s.match(/IP\(?-?(\d+)\)?/);
+  if (!m) return null;
+  const k = parseInt(m[1],10);
+  return Number.isFinite(k) ? k : null;
+}
+
+function dxfExtractPlanControlPoints(dxfText){
+  const texts = dxfExtractTextLike(dxfText)
+    .filter(t=>t.text)
+    .map(t=>({
+      ...t,
+      text: String(t.text).replace(/[\u3000]/g,' ').trim()
+    }));
+  const conv = dxfDetectCoordConvention(texts);
+
+  // 1) inline coords: a single entity contains both coords
+  const pts = { BP:null, EP:null, IP:[] };
+  for (const t of texts){
+    const s = t.text.toUpperCase();
+    const inline = dxfParseCoordInline(t.text);
+    if (!inline) continue;
+    const coord = (function(){
+      // map inline to {E,N}
+      let E=null,N=null;
+      if (Number.isFinite(inline.E) && Number.isFinite(inline.N)) { E=inline.E; N=inline.N; }
+      else if (Number.isFinite(inline.X) && Number.isFinite(inline.Y)) { N=inline.X; E=inline.Y; }
+      if (!Number.isFinite(E) || !Number.isFinite(N)) return null;
+      return {E,N};
+    })();
+    if (!coord) continue;
+    if (/\bBP\b/.test(s)) pts.BP = { name:'BP', ...coord };
+    else if (/\bEP\b/.test(s)) pts.EP = { name:'EP', ...coord };
+    else if (/\bIP\b/.test(s)) {
+      const idx = dxfLabelToIpIndex(s) || (pts.IP.length+1);
+      pts.IP.push({ idx, name:`IP${idx}`, ...coord });
+    }
+  }
+
+  // 2) proximity coords: label entity near two numeric entities (E/N or X/Y)
+  function resolveByProximity(labelRegex, name){
+    const lab = texts.find(t=>labelRegex.test(String(t.text||'')) && Number.isFinite(t.x) && Number.isFinite(t.y));
+    if (!lab) return null;
+    // parse if label text itself contains coords (handled above) -> skip
+    const near = dxfFindNearbyText(texts, lab, 120);
+    // prefer strings like "X=..." or "E=..."
+    let E=null, N=null;
+    for (const n of near){
+      const inl = dxfParseCoordInline(n.text);
+      if (!inl) continue;
+      if (Number.isFinite(inl.E)) E=inl.E;
+      if (Number.isFinite(inl.N)) N=inl.N;
+      if (Number.isFinite(inl.X)) N=inl.X;
+      if (Number.isFinite(inl.Y)) E=inl.Y;
+    }
+    if (Number.isFinite(E) && Number.isFinite(N)) return { name, E, N };
+
+    // otherwise pick two closest numeric-only values (coordinate-like)
+    const nums = near
+      .filter(t=>dxfIsNumberOnly(t.text))
+      .map(t=>({t, v:parseFloat(String(t.text).trim())}))
+      .filter(o=>Number.isFinite(o.v))
+      // coord-like: avoid small dims
+      .filter(o=>Math.abs(o.v) >= 1000)
+      .slice(0, 6);
+    if (nums.length < 2) return null;
+    // choose two with smallest distance to label
+    nums.sort((a,b)=>dxfDist(a.t,lab)-dxfDist(b.t,lab));
+    const a=nums[0], b=nums[1];
+    // assign by convention + x ordering (common table: X then Y, or N then E)
+    const left = (a.t.x <= b.t.x) ? a : b;
+    const right= (a.t.x <= b.t.x) ? b : a;
+    if (conv==='XY') {
+      N = left.v; E = right.v;
+    } else {
+      N = left.v; E = right.v;
+    }
+    if (!Number.isFinite(E) || !Number.isFinite(N)) return null;
+    return { name, E, N };
+  }
+
+  if (!pts.BP) pts.BP = resolveByProximity(/^BP\b/i, 'BP');
+  if (!pts.EP) pts.EP = resolveByProximity(/^EP\b/i, 'EP');
+
+  // IP labels: resolve all that appear
+  const ipLabs = texts
+    .filter(t=>/^IP\s*[-(]?\d+\b/i.test(String(t.text||'')) && Number.isFinite(t.x)&&Number.isFinite(t.y))
+    .slice(0, 80);
+  for (const lab of ipLabs){
+    const idx = dxfLabelToIpIndex(lab.text);
+    if (!idx) continue;
+    // skip if already resolved
+    if (pts.IP.some(p=>p.idx===idx)) continue;
+    const r = resolveByProximity(new RegExp(`^IP\\s*[-(]?${idx}\\b`, 'i'), `IP${idx}`);
+    if (r) pts.IP.push({ idx, name:`IP${idx}`, E:r.E, N:r.N });
+  }
+
+  pts.IP.sort((a,b)=>a.idx-b.idx);
+  // sanity: need BP/EP at minimum
+  if (!pts.BP || !pts.EP) return null;
+  return pts;
 }
 
 function dxfBuildProfileFromBoxTable(dxfText){
@@ -4405,15 +4585,39 @@ const render = () => {
         if (msg) msg.textContent = "DXF解析中…";
         const dxfText = await readLocalFileText(file);
 
-        // build plan (BP/EP/IP)
-        const pl = dxfBuildPlanFromCenterline(dxfText);
-        state.bp = { name:"BP", N: +pl.bp[1], E: +pl.bp[0] };
-        state.ep = { name:"EP", N: +pl.ep[1], E: +pl.ep[0] };
-        state.ipPoints = pl.ips.map((p,i)=>({ id:i+1, name:`IP${i+1}`, N:+p[1], E:+p[0] }));
-        state.useIpCount = state.ipPoints.length;
+        // 1) まずは座標注記（BP/EP/IP）を優先で読む。
+        // 2) 注記が無い場合は、中心線ポリラインの頂点から BP/EP/IP を生成してフォールバック。
+        // 3) ただし座標が原点近傍（ローカル）なら「座標設定して下さい」として止める。
+        let pl = null;
+        const cp = dxfExtractPlanControlPoints(dxfText);
+        if (cp && cp.BP && cp.EP){
+          state.bp = { name:"BP", N: +cp.BP.N, E: +cp.BP.E };
+          state.ep = { name:"EP", N: +cp.EP.N, E: +cp.EP.E };
+          state.ipPoints = (cp.IP||[])
+            .map((p)=>({ id: (Number.isFinite(p.idx)?p.idx:undefined), name: String(p.name||''), N:+p.N, E:+p.E }))
+            .filter(p=>Number.isFinite(p.N)&&Number.isFinite(p.E))
+            .sort((a,b)=>(a.id||0)-(b.id||0))
+            .map((p,i)=>({ id: Number.isFinite(p.id)?p.id:(i+1), name: p.name || `IP${Number.isFinite(p.id)?p.id:(i+1)}`, N:p.N, E:p.E }));
+          state.useIpCount = state.ipPoints.length;
+        } else {
+          // フォールバック：中心線（LWPOLYLINE）から作成
+          pl = dxfBuildPlanFromCenterline(dxfText);
+          if (!dxfIsLikelyGeoreferenced(pl.clPts)){
+            throw new Error(
+              "この平面DXFは、現場座標が設定されていない可能性があります（座標が原点近傍）。\n"+
+              "図面の座標系を設定してから再度読み込んでください。\n"+
+              "※BP/EP/IPの座標注記が無くても中心線から復元できますが、座標系が未設定だと現場座標になりません。"
+            );
+          }
+          state.bp = { name:"BP", N: +pl.bp[1], E: +pl.bp[0] };
+          state.ep = { name:"EP", N: +pl.ep[1], E: +pl.ep[0] };
+          state.ipPoints = (pl.ips||[]).map((p,i)=>({ id:i+1, name:`IP${i+1}`, N:+p[1], E:+p[0] }));
+          state.useIpCount = state.ipPoints.length;
+        }
 
-        // bridge -> cross6 overrides (best-effort)
+        // bridge -> cross6 overrides requires CL geometry (best-effort)
         try{
+          if (!pl) pl = dxfBuildPlanFromCenterline(dxfText);
           const ranges = dxfFindBridgeRanges(dxfText, pl.clPts);
           if (ranges && ranges.length){
             const cross6 = getStdCrossTemplate(6);
@@ -4425,10 +4629,11 @@ const render = () => {
               state.cross.overrides[k2] = commonBack;
             }
           }
-        }catch(_){ /* ignore bridge errors */ }
+        }catch(_){ /* bridge projection is best-effort */ }
 
         saveState(); render();
-        if (msg) msg.textContent = `反映OK：IP ${state.ipPoints.length}点（折れ線近似）`;
+        if (msg) msg.textContent = cp ? `反映OK：BP/EP/IP 座標注記を読取り（IP ${state.ipPoints.length}点）`
+                                      : `反映OK：中心線からBP/EP/IPを生成（IP ${state.ipPoints.length}点）`;
       }catch(e){
         if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
       }
