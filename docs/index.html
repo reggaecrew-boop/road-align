@@ -11,7 +11,7 @@
   <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.12";
+    window.APP_VERSION = "18.10.13";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -7501,7 +7501,6 @@ function buildExportFileName(kind){
   const base = _sanitizeFilePart((input==null ? defBase : input));
   try{ localStorage.setItem("lastExportBaseName", base); }catch(e){}
   return `${base}_${kind}_${_tsCompact()}.json`;
-}
 }
 
 </script>
