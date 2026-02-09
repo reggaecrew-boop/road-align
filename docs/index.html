@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.19";
+    window.APP_VERSION = "18.10.20";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1064,39 +1064,169 @@ function dxfExtractPlanControlPoints(dxfText){
   return pts;
 }
 
-function dxfBuildProfileFromBoxTable(dxfText){
-  const texts = dxfExtractTextLike(dxfText).filter(t=>Number.isFinite(t.x)&&Number.isFinite(t.y));
-  // find labels (best-effort)
-  const rowSta = findRowNearLabel(texts, /累加\s*距離|累加距離/);
-  const rowZ   = findRowNearLabel(texts, /計画\s*高|計画高/);
-  if (!rowSta || rowSta.cells.length<2) throw new Error("箱書きの『累加距離』行が見つかりません");
-  if (!rowZ   || rowZ.cells.length<2)   throw new Error("箱書きの『計画高』行が見つかりません");
 
-  // map by nearest x
+function dxfBuildProfileFromBoxTable(dxfText){
+  const textsAll = dxfExtractTextLike(dxfText).filter(t=>t && t.text!=null && Number.isFinite(t.x) && Number.isFinite(t.y));
+  const texts = textsAll.map(t=>({x:t.x,y:t.y,text:String(t.text)}));
+
+  const tolY = 3; // row tolerance
+
+  // --- STA row detection (behavior-based; not label-based) ---
+  const rowMap = new Map(); // key -> items
+  for (const t of texts){
+    const key = Math.round(t.y / tolY) * tolY;
+    if (!rowMap.has(key)) rowMap.set(key, []);
+    rowMap.get(key).push(t);
+  }
+
+  const tryParseStaToken = (s)=>{
+    const raw = String(s||"").trim();
+    if (!raw) return null;
+    // Prefer explicit STA-like tokens: contains '+' or starts with STA
+    const isStaLike = /STA\.?/i.test(raw) || raw.includes("+") || raw.includes("＋");
+    // parseSta100 accepts plain numeric too; for row scoring we keep isStaLike
+    try {
+      const m = parseSta100(raw.replace(/＋/g,"+"));
+      return Number.isFinite(m) ? {m, isStaLike} : null;
+    } catch(e){
+      return null;
+    }
+  };
+
+  let bestStaRow = null;
+  let bestScore = -Infinity;
+
+  for (const [yKey, items] of rowMap.entries()){
+    const cells = [];
+    let staLikeCount = 0;
+    for (const it of items){
+      const p = tryParseStaToken(it.text);
+      if (!p) continue;
+      cells.push({x:it.x, y:it.y, raw:it.text, m:p.m, isStaLike:p.isStaLike});
+      if (p.isStaLike) staLikeCount++;
+    }
+    if (cells.length < 3) continue;
+
+    // Score: prefer many parsable + many explicit STA-like tokens
+    const score = cells.length*10 + staLikeCount*30;
+    if (score > bestScore){
+      bestScore = score;
+      bestStaRow = {y0:yKey, cells: cells.sort((a,b)=>a.x-b.x)};
+    }
+  }
+
+  if (!bestStaRow) throw new Error("箱書きの『測点(STA)』行が見つかりません（0+0.000 や STA2+0.000 等の測点表記が必要です）");
+
+  // --- Z row detection ---
+  // Prefer label-based, but allow synonyms (計画高/計画標高/表層/路面)
+  const rowZ_byLabel = findRowNearLabel(textsAll, /計画\s*(?:高|標高)|計画(?:高|標高)|表層|路面/i);
+  let rowZ = rowZ_byLabel;
+
+  if (!rowZ || !rowZ.cells || rowZ.cells.length < 3){
+    // Fallback: choose the numeric row with the most cells, excluding near STA row
+    let best = null;
+    let bestN = -1;
+    for (const [yKey, items] of rowMap.entries()){
+      if (Math.abs(yKey - bestStaRow.y0) <= tolY*2) continue;
+      const nums = items
+        .map(it=>({x:it.x,y:it.y,raw:it.text}))
+        .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(String(r.raw).trim()))
+        .map(r=>({x:r.x,y:r.y,v:parseFloat(String(r.raw).trim())}))
+        .filter(r=>Number.isFinite(r.v))
+        .sort((a,b)=>a.x-b.x);
+      if (nums.length > bestN){
+        bestN = nums.length;
+        best = {y0:yKey, cells: nums};
+      }
+    }
+    rowZ = best;
+  }
+
+  if (!rowZ || !rowZ.cells || rowZ.cells.length < 3) throw new Error("箱書きの『計画高（表層）』行が見つかりません");
+
+  // --- Match STA cells to nearest Z cells by X ---
   const zs = rowZ.cells;
-  const points = rowSta.cells.map(c=>{
+  const rawPts = bestStaRow.cells.map(c=>{
     let best = zs[0];
     let bestDx = Math.abs(best.x - c.x);
     for (const z of zs){
       const dx = Math.abs(z.x - c.x);
       if (dx < bestDx){ bestDx = dx; best = z; }
     }
-    return { sta: c.v, z: best.v };
-  }).filter(p=>Number.isFinite(p.sta)&&Number.isFinite(p.z));
+    return { sta: +c.m, z: +best.v };
+  }).filter(p=>Number.isFinite(p.sta) && Number.isFinite(p.z));
 
-  points.sort((a,b)=>a.sta-b.sta);
-  if (points.length<2) throw new Error("箱書きから測点・標高の点が十分に取れません");
+  rawPts.sort((a,b)=>a.sta-b.sta);
 
-  const startSta = points[0].sta;
-  const startZ   = points[0].z;
-  const grades = [];
-  for (let i=0;i<points.length-1;i++){
-    const s0=points[i].sta, z0=points[i].z;
-    const s1=points[i+1].sta, z1=points[i+1].z;
-    const g = 100*(z1-z0)/(s1-s0);
-    grades.push({ id: i+1, nextSta: +s1.toFixed(3), gradePct: +g.toFixed(6) });
+  // dedupe by sta
+  const pts = [];
+  for (const p of rawPts){
+    if (!pts.length || Math.abs(pts[pts.length-1].sta - p.sta) > 1e-6){
+      pts.push(p);
+    } else {
+      pts[pts.length-1] = p;
+    }
   }
-  return { startSta: +startSta.toFixed(3), startZ: +startZ.toFixed(3), grades };
+
+  if (pts.length < 2) throw new Error("箱書きからSTA・計画高の点が十分に取れません");
+
+  // --- Resample by PWA staPitch (A: 測点表示ピッチ) ---
+  const pitch = Math.max(1, Math.floor(state.staPitch||1));
+  const sMin = pts[0].sta;
+  const sMax = pts[pts.length-1].sta;
+
+  const interpZ = (s)=>{
+    if (s <= pts[0].sta) return pts[0].z;
+    if (s >= pts[pts.length-1].sta) return pts[pts.length-1].z;
+    // find segment (linear scan; pts count is small)
+    for (let i=0;i<pts.length-1;i++){
+      const a=pts[i], b=pts[i+1];
+      if (s >= a.sta && s <= b.sta){
+        const t = (s - a.sta) / (b.sta - a.sta);
+        return a.z + t*(b.z - a.z);
+      }
+    }
+    return pts[pts.length-1].z;
+  };
+
+  const samples = [];
+  let s = sMin;
+  // keep original start
+  samples.push({sta:sMin, z: interpZ(sMin)});
+  // advance by pitch from start
+  while (s + pitch < sMax - 1e-9){
+    s = s + pitch;
+    samples.push({sta:+s.toFixed(3), z: interpZ(s)});
+  }
+  if (Math.abs(samples[samples.length-1].sta - sMax) > 1e-6){
+    samples.push({sta:+sMax.toFixed(3), z: interpZ(sMax)});
+  }
+
+  // build grades (merge same grade)
+  const grades = [];
+  let gid = 1;
+
+  const roundSta = (v)=> +(+v).toFixed(3);
+  const roundG  = (v)=> +(+v).toFixed(6);
+
+  for (let i=0;i<samples.length-1;i++){
+    const a=samples[i], b=samples[i+1];
+    const ds = b.sta - a.sta;
+    if (!Number.isFinite(ds) || ds<=0) continue;
+    const g = 100*(b.z - a.z)/ds;
+    const gR = roundG(g);
+    const nextSta = roundSta(b.sta);
+
+    const last = grades[grades.length-1];
+    if (last && Math.abs(last.gradePct - gR) < 1e-6){
+      // extend
+      last.nextSta = nextSta;
+    } else {
+      grades.push({ id: gid++, nextSta, gradePct: gR });
+    }
+  }
+
+  return { startSta: roundSta(samples[0].sta), startZ: +(+samples[0].z).toFixed(3), grades };
 }
 
 function dxfFindStaListNearCL(dxfText){
@@ -6067,8 +6197,8 @@ const cr = computeCrossSide("common", "right");
 
       <div class="row" style="margin-top:10px; align-items:flex-end;">
         <div style="width:260px;">
-          <label>プレビュー測点（m / k+rem）</label>
-          <input id="xsPreviewSta" type="text" placeholder="例：110.000 / 1+10.000" value="${(state.cross.ui.previewTok||"")}" />
+          <label>プレビュー測点（作成済み横断面）</label>
+          <select id="xsPreviewStaSel"></select>
           <div class="mini">pitch=${pitch}m</div>
         </div>
 
@@ -6893,12 +7023,55 @@ const cr = computeCrossSide("common", "right");
     }
   };
 
-  const inpPrev = document.getElementById('xsPreviewSta');
+  const inpPrev = document.getElementById('xsPreviewStaSel');
   const btnPrev = document.getElementById('xsPreviewShow');
   const btnUseSel = document.getElementById('xsPreviewUseSelected');
 
+  
+  const fmtSta100 = (m)=>{
+    const k = Math.floor(m/100);
+    const rem = m - k*100;
+    const remTxt = rem.toFixed(3).padStart(7,'0');
+    return `${k}+${remTxt}`;
+  };
+  const populatePreviewSta = ()=>{
+    if (!inpPrev) return;
+    const keys = Object.keys((state.cross && state.cross.overrides) ? state.cross.overrides : {})
+      .map(k=>String(k))
+      .filter(k=>/^[+-]?\d+(?:\.\d+)?$/.test(k))
+      .sort((a,b)=>parseFloat(a)-parseFloat(b));
+    inpPrev.innerHTML = "";
+    if (!keys.length){
+      const opt = document.createElement('option');
+      opt.value = "";
+      opt.textContent = "（作成済み横断面なし）";
+      inpPrev.appendChild(opt);
+      inpPrev.disabled = true;
+      return;
+    }
+    inpPrev.disabled = false;
+    for (const k of keys){
+      const m = parseFloat(k);
+      const opt = document.createElement('option');
+      opt.value = k;
+      opt.textContent = `${fmtSta100(m)}（${(+m).toFixed(3)}m）`;
+      inpPrev.appendChild(opt);
+    }
+    // restore selection
+    const cur = String((state.cross && state.cross.ui && state.cross.ui.previewTok) ? state.cross.ui.previewTok : "");
+    if (cur && keys.includes(cur)){
+      inpPrev.value = cur;
+    } else {
+      inpPrev.value = keys[0];
+      state.cross.ui.previewTok = inpPrev.value;
+      saveState();
+    }
+  };
+  populatePreviewSta();
+
   const runPrev = ()=>{
     const tok = (inpPrev?.value||'').trim();
+    if (!tok){ if (infoEl) infoEl.textContent = '作成済み横断面がありません'; return; }
     ensureCrossState();
     state.cross.ui.previewTok = tok;
     saveState();
