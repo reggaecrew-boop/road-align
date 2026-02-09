@@ -4662,6 +4662,9 @@ const render = () => {
           state.useIpCount = state.ipPoints.length;
         }
 
+
+        // DXFからBP/EP/IPを更新したら、旧い曲線設定が残ると平面が描けないことがあるため一旦クリア
+        state.curveSettings = [];
         // bridge -> cross6 overrides requires CL geometry (best-effort)
         try{
           if (!pl) pl = dxfBuildPlanFromCenterline(dxfText);
