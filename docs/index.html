@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.18";
+    window.APP_VERSION = "18.10.19";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -4811,7 +4811,7 @@ const render = () => {
         if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
       }
     };
-  })()
+  })();
 /* Plan JSON import bind */
 (function(){
   const fi = document.getElementById("planJsonFile");
@@ -5499,7 +5499,7 @@ document.getElementById("profEnabled").onchange = (e)=>{ state.profile.enabled =
       if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
     }
   };
-})()
+})();
 /* Profile JSON import bind */
 (function(){
   const fi = document.getElementById('profileJsonFile');
@@ -6230,7 +6230,7 @@ const cr = computeCrossSide("common", "right");
         if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
       }
     };
-  })()
+  })();
 /* Cross JSON import bind */
 (function(){
   const fi = document.getElementById('crossJsonFile');
