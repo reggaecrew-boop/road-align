@@ -11,7 +11,7 @@
   <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.2";
+    window.APP_VERSION = "18.10.3";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -740,22 +740,69 @@ function findRowNearLabel(texts, labelRegex){
   return { y0, cells: nums };
 }
 
-function dxfBuildPlanFromCenterline(dxfText){
-  // heuristic: pick longest LWPOLYLINE on layer C-STR-RANE-既設 with high sheet Y
-  const polylines = dxfExtractLwPolylines(dxfText);
-  const candidates = polylines
-    .filter(p=>p.layer==="C-STR-RANE-既設")
-    .map(p=>{
-      let minY=Infinity;
-      for (const pt of p.pts) minY = Math.min(minY, pt[1]);
-      return {p, L: polylineLength(p.pts,p.closed), minY};
-    })
-    .filter(r=>r.L>1000)
-    .filter(r=>r.minY>22000);
-  const best = candidates.sort((a,b)=>b.L-a.L)[0];
-  if (!best) throw new Error("中心線（LWPOLYLINE / layer=C-STR-RANE-既設）が見つかりません");
+function dxfScoreCenterlineCandidate(p){
+  // p: {layer, pts, closed}
+  const L = polylineLength(p.pts, p.closed);
+  if (!Number.isFinite(L)) return -Infinity;
 
-  const pts = rdpSimplify(best.p.pts, 0.01);
+  // bounding box span
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for (const pt of (p.pts||[])){
+    if (!pt || !Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) continue;
+    minX=Math.min(minX, pt[0]); minY=Math.min(minY, pt[1]);
+    maxX=Math.max(maxX, pt[0]); maxY=Math.max(maxY, pt[1]);
+  }
+  const spanX = (Number.isFinite(maxX-minX)? (maxX-minX):0);
+  const spanY = (Number.isFinite(maxY-minY)? (maxY-minY):0);
+  const span = Math.max(spanX, spanY);
+
+  // layer hints (optional)
+  const layer = String(p.layer||"").toUpperCase();
+  let bonus = 0;
+  if (layer.includes("CL") || layer.includes("CENTER") || layer.includes("CENT") || layer.includes("中心") || layer.includes("既設") || layer.includes("RANE")) bonus += 0.10;
+  if (layer.includes("GRID") || layer.includes("枠") || layer.includes("TITLE") || layer.includes("VIEW")) bonus -= 0.10;
+
+  // score: length dominates; span helps; layer bonus small
+  return L * (1 + bonus) + span * 0.05;
+}
+
+function dxfPickCenterlinePolyline(dxfText){
+  const polylines = dxfExtractLwPolylines(dxfText);
+
+  // baseline filter: non-trivial, non-closed, has points
+  const cand = polylines
+    .filter(p=>Array.isArray(p.pts) && p.pts.length >= 2)
+    .filter(p=>!p.closed) // centerline should not be closed in most cases
+    .map(p=>({ p, score: dxfScoreCenterlineCandidate(p), L: polylineLength(p.pts,p.closed) }))
+    .filter(r=>Number.isFinite(r.score) && r.L > 100) // ignore tiny stuff (title blocks, etc.)
+    .sort((a,b)=>b.score-a.score);
+
+  if (!cand.length) return null;
+
+  // if there are multiple plausible candidates, let user choose (mobile-safe: prompt)
+  const top = cand[0];
+  const shortlist = cand.slice(0, 8);
+  const near = shortlist.filter(r=>r.L >= top.L * 0.80); // within 80% length of top
+  const list = (near.length >= 2) ? near : shortlist.slice(0, Math.min(4, shortlist.length));
+
+  if (list.length >= 2){
+    const lines = list.map((r,i)=>`${i}: layer=${String(r.p.layer||"")} / L=${r.L.toFixed(1)}`);
+    const ans = prompt(
+      "中心線候補が複数見つかりました。番号を選んでください（未入力なら0）\n\n" + lines.join("\n"),
+      "0"
+    );
+    const k = parseInt(String(ans||"0"),10);
+    if (Number.isFinite(k) && k>=0 && k<list.length) return list[k].p;
+  }
+  return top.p;
+}
+
+function dxfBuildPlanFromCenterline(dxfText){
+  // 中心線レイヤ名が現場でまちまちなので、ポリライン候補をスコアリングして選択する
+  const picked = dxfPickCenterlinePolyline(dxfText);
+  if (!picked) throw new Error("中心線候補（LWPOLYLINE）が見つかりません。中心線がポリラインで作図されているか確認してください。");
+
+  const pts = rdpSimplify(picked.pts, 0.01);
   if (pts.length<2) throw new Error("中心線の点列が不足しています");
   const bp = pts[0];
   const ep = pts[pts.length-1];
