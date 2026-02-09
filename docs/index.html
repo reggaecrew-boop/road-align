@@ -11,7 +11,7 @@
   <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.11";
+    window.APP_VERSION = "18.10.12";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -869,21 +869,12 @@ function dxfBuildPlanFromCenterline(dxfText){
   const picked = dxfPickCenterlinePolyline(dxfText);
   if (!picked) throw new Error("中心線候補（LWPOLYLINE）が見つかりません。中心線がポリラインで作図されているか確認してください。");
 
-  // 点が多すぎると localStorage に保存できず「タブ選択だけ残る」事故になるため、適応的に簡略化する
-  const MAX_PLAN_PTS = 600; // BP/EP含む（IPは最大598）
-  let eps = 0.2; // m（初期）
-  let pts = rdpSimplify(picked.pts, eps);
-  // 段階的に許容誤差を上げて点数を落とす（現場ごとに頂点密度が違うため）
-  while (pts.length > MAX_PLAN_PTS && eps < 50){
-    eps = (eps < 1) ? eps*2 : (eps < 10 ? eps+1 : eps*1.5);
-    pts = rdpSimplify(picked.pts, eps);
-  }
-  if (pts.length < 2) throw new Error("中心線の点列が不足しています");
-
+  const pts = rdpSimplify(picked.pts, 0.01);
+  if (pts.length<2) throw new Error("中心線の点列が不足しています");
   const bp = pts[0];
   const ep = pts[pts.length-1];
   const ips = pts.slice(1, pts.length-1);
-  return { bp, ep, ips, clPts: pts, simplifyEps: eps, originalPts: (picked.pts||[]).length };
+  return { bp, ep, ips, clPts: pts };
 }
 
 // 図面の座標系が「現場座標として設定されている」かの簡易判定。
@@ -4371,7 +4362,7 @@ const render = () => {
     if (computeError) {
       const msg = (computeError && (computeError.message || computeError.toString())) || "unknown";
       bs.innerHTML = `<span class="warn">⚠️ 計算エラーで画面描画が止まりました：${escapeHtml(msg)}</span>
-      <button type="button" id="btnResetLS" class="btn btn-ghost" style="margin-left:10px; width:auto; display:inline-block;">保存データ初期化</button>
+      <button id="btnResetLS" class="btn btn-ghost" style="margin-left:10px; width:auto; display:inline-block;">保存データ初期化</button>
       <span class="mini" style="margin-left:10px;">（localStorageを消して再起動）</span>`;
       setTimeout(()=>{
         const b = document.getElementById("btnResetLS");
@@ -4404,7 +4395,7 @@ const render = () => {
         </div>
         <div>
           <label>読み込み</label>
-          <button type="button" class="btn" id="btnPlanImport">読み込みして反映</button>
+          <button class="btn" id="btnPlanImport">読み込みして反映</button>
           <div id="planImportMsg" class="mini" style="margin-top:8px;">${escHtml(planImportMsgText)}</div>
         </div>
       </div>
@@ -4420,7 +4411,7 @@ const render = () => {
         </div>
         <div>
           <label>読み込み</label>
-          <button type="button" class="btn" id="btnPlanDxfImport">DXFを解析して反映</button>
+          <button class="btn" id="btnPlanDxfImport">DXFを解析して反映</button>
           <div id="planDxfMsg" class="mini" style="margin-top:8px;"></div>
         </div>
       </div>
@@ -4434,8 +4425,8 @@ const render = () => {
   </div>
   <div>
     <label>読み込み</label>
-    <button type="button" class="btn btn-ok" id="btnPlanJsonImport">JSONを反映</button>
-    <button type="button" class="btn" id="btnPlanJsonExport">平面JSONを書き出し</button>
+    <button class="btn btn-ok" id="btnPlanJsonImport">JSONを反映</button>
+    <button class="btn" id="btnPlanJsonExport">平面JSONを書き出し</button>
     <div id="planJsonMsg" class="mini" style="margin-top:8px;"></div>
   </div>
 </div>
@@ -4456,9 +4447,9 @@ const render = () => {
         </div>
         <div>
           <label>操作</label>
-          <button type="button" class="btn" id="btnCoordLoad">CSVを読み込み</button>
+          <button class="btn" id="btnCoordLoad">CSVを読み込み</button>
           <div style="height:8px;"></div>
-          <button type="button" class="btn btn-ghost" id="btnCoordClear">一覧をクリア</button>
+          <button class="btn btn-ghost" id="btnCoordClear">一覧をクリア</button>
           <div class="mini" style="margin-top:6px;">最終読込：${escHtml(state.coordCatalog.lastFile||"")} ${escHtml(state.coordCatalog.lastLoadedAt||"")}</div>
         </div>
       </div>
@@ -4474,9 +4465,9 @@ const render = () => {
                 <td class="right mono">${Number(r.E).toFixed(d)}</td>
                 <td class="right mono">${(r.Z==null||!Number.isFinite(+r.Z))?"":Number(r.Z).toFixed(3)}</td>
                 <td>
-                  <button type="button" class="btn btn-ghost" data-cat-bp="${r._i}">BP</button>
-                  <button type="button" class="btn btn-ghost" data-cat-ep="${r._i}">EP</button>
-                  <button type="button" class="btn btn-ghost" data-cat-ip="${r._i}">+IP</button>
+                  <button class="btn btn-ghost" data-cat-bp="${r._i}">BP</button>
+                  <button class="btn btn-ghost" data-cat-ep="${r._i}">EP</button>
+                  <button class="btn btn-ghost" data-cat-ip="${r._i}">+IP</button>
                 </td>
               </tr>`).join("")}
           </tbody>
@@ -4515,9 +4506,9 @@ const render = () => {
           <div class="mini"><span id="useIpLabel"></span></div>
         </div>
         <div>
-          <button type="button" class="btn" id="addIP">+ IP追加</button>
+          <button class="btn" id="addIP">+ IP追加</button>
           <div style="height:10px;"></div>
-          <button type="button" class="btn btn-ghost" id="resetDemo">デモ値に戻す</button>
+          <button class="btn btn-ghost" id="resetDemo">デモ値に戻す</button>
         </div>
         <div>
           <label>IP削除（名前指定）</label>
@@ -4526,7 +4517,7 @@ const render = () => {
             ${state.ipPoints.map(p=>`<option value="${p.id}">${p.name}</option>`).join("")}
           </select>
           <div style="height:10px;"></div>
-          <button type="button" class="btn btn-ghost" id="delIP">選択IPを削除</button>
+          <button class="btn btn-ghost" id="delIP">選択IPを削除</button>
         </div>
       </div>
 
@@ -4549,7 +4540,7 @@ const render = () => {
       <h2>曲線設定（IP名ごと）</h2>
       <div class="grid grid-3">
         <div class="mini">direction: auto/left/right/none、R>0 のとき曲線として扱います</div>
-        <div><button type="button" class="btn" id="addCurve">+ 曲線追加</button></div>
+        <div><button class="btn" id="addCurve">+ 曲線追加</button></div>
         <div class="mini">A指定：L1=A1²/R、L2=A2²/R（A2空欄ならA1と同じ）</div>
       </div>
 
@@ -4578,7 +4569,7 @@ const render = () => {
                 <td class="right">${(+c.R>0 && +((c.A2 ?? c.A1) ?? 0)>0) ? (((+((c.A2 ?? c.A1) ?? 0))*(+((c.A2 ?? c.A1) ?? 0)))/(+c.R)).toFixed(3) : ""}</td>
 
 <td><input data-c-ds="${c.id}" type="text" inputmode="decimal" autocomplete="off" value="${c.ds ?? ""}" /></td>
-                <td class="right"><button type="button" class="btn btn-ghost" data-c-del="${c.id}">削除</button></td>
+                <td class="right"><button class="btn btn-ghost" data-c-del="${c.id}">削除</button></td>
               </tr>`).join("")}
           </tbody>
         </table>
@@ -4648,9 +4639,9 @@ const render = () => {
           <textarea id="extraTokens_plan" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
         </div>
         <div>
-          <button type="button" class="btn" id="addExtras_plan">＋ 追加</button>
+          <button class="btn" id="addExtras_plan">＋ 追加</button>
           <div style="height:10px;"></div>
-          <button type="button" class="btn btn-ghost" id="clearExtras_plan">平面追加を全クリア</button>
+          <button class="btn btn-ghost" id="clearExtras_plan">平面追加を全クリア</button>
         </div>
       </div>
 
@@ -4664,7 +4655,7 @@ const render = () => {
                 <td>${x.id}</td>
                 <td>${metersToStaPitch(x.m, pitch, 3)}</td>
                 <td><input data-ex-group="plan" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
-                <td class="right"><button type="button" class="btn btn-ghost" data-ex-group="plan" data-ex-del="${x.id}">削除</button></td>
+                <td class="right"><button class="btn btn-ghost" data-ex-group="plan" data-ex-del="${x.id}">削除</button></td>
               </tr>
             `).join("")}
           </tbody>
@@ -5260,7 +5251,7 @@ viewProfile.innerHTML = `
       </div>
       <div>
         <label>読み込み</label>
-        <button type="button" class="btn" id="btnProfileDxfImport">DXFを解析して反映</button>
+        <button class="btn" id="btnProfileDxfImport">DXFを解析して反映</button>
         <div id="profileDxfMsg" class="mini" style="margin-top:8px;"></div>
       </div>
     </div>
@@ -5272,8 +5263,8 @@ viewProfile.innerHTML = `
   </div>
   <div>
     <label>読み込み</label>
-    <button type="button" class="btn btn-ok" id="btnProfileJsonImport">JSONを反映</button>
-    <button type="button" class="btn" id="btnProfileJsonExport">縦断JSONを書き出し</button>
+    <button class="btn btn-ok" id="btnProfileJsonImport">JSONを反映</button>
+    <button class="btn" id="btnProfileJsonExport">縦断JSONを書き出し</button>
     <div id="profileJsonMsg" class="mini" style="margin-top:8px;"></div>
   </div>
 </div>
@@ -5286,12 +5277,12 @@ viewProfile.innerHTML = `
         <div class="mini">勾配%：小数3桁（例 2.534%） / ymax：小数3桁（例 0.145m）</div>
       </div>
       <div>
-        <button type="button" class="btn" id="addGradeRow">＋ 勾配区間追加</button>
+        <button class="btn" id="addGradeRow">＋ 勾配区間追加</button>
         <div style="height:10px;"></div>
-        <button type="button" class="btn btn-ghost" id="sortGradeRow">測点で整列</button>
+        <button class="btn btn-ghost" id="sortGradeRow">測点で整列</button>
       </div>
       <div>
-        <button type="button" class="btn btn-ok" id="setEndToTotal">終点を平面総延長にセット</button>
+        <button class="btn btn-ok" id="setEndToTotal">終点を平面総延長にセット</button>
         <div class="mini" style="margin-top:8px;">最後の勾配区間の nextSta を ${res.total.toFixed(3)}m にします</div>
       </div>
       <div class="mini">
@@ -5325,7 +5316,7 @@ viewProfile.innerHTML = `
             <tr>
               <td><input data-g-nextsta="${r.id}" type="number" step="0.001" value="${Number(r.nextSta??0).toFixed(3)}"/></td>
               <td><input data-g-grade="${r.id}" type="number" step="0.001" value="${Number(r.gradePct??0).toFixed(3)}"/></td>
-              <td class="right"><button type="button" class="btn btn-ghost" data-g-del="${r.id}">削除</button></td>
+              <td class="right"><button class="btn btn-ghost" data-g-del="${r.id}">削除</button></td>
             </tr>
           `).join("")}
         </tbody>
@@ -5370,9 +5361,9 @@ viewProfile.innerHTML = `
         <b>L優先</b>。Lが空のときは ymax から <b>L=8*ymax/|A|</b> で換算（A=勾配差）。
       </div>
       <div>
-        <button type="button" class="btn" id="addVcurve">＋ 縦断曲線追加</button>
+        <button class="btn" id="addVcurve">＋ 縦断曲線追加</button>
         <div style="height:10px;"></div>
-        <button type="button" class="btn btn-ghost" id="sortVcurve">VPIで整列</button>
+        <button class="btn btn-ghost" id="sortVcurve">VPIで整列</button>
       </div>
       <div class="mini">
         PV候補：${pvInternal.length} 点（内部PVのみ）
@@ -5411,7 +5402,7 @@ viewProfile.innerHTML = `
                 <td>${A.toFixed(3)}</td>
                 <td><input data-vc-l="${r.id}" type="number" step="0.001" value="${(r.L==null||r.L==="")?"":Number(r.L).toFixed(3)}" placeholder="例 80.000"/></td>
                 <td><input data-vc-y="${r.id}" type="number" step="0.001" value="${(r.ymax==null||r.ymax==="")?"":Number(r.ymax).toFixed(3)}" placeholder="例 0.145"/></td>
-                <td class="right"><button type="button" class="btn btn-ghost" data-vc-del="${r.id}">削除</button></td>
+                <td class="right"><button class="btn btn-ghost" data-vc-del="${r.id}">削除</button></td>
               </tr>
             `;
           }).join("")}
@@ -5433,9 +5424,9 @@ viewProfile.innerHTML = `
         <textarea id="extraTokens_profile" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
       </div>
       <div>
-        <button type="button" class="btn" id="addExtras_profile">＋ 追加</button>
+        <button class="btn" id="addExtras_profile">＋ 追加</button>
         <div style="height:10px;"></div>
-        <button type="button" class="btn btn-ghost" id="clearExtras_profile">縦断追加を全クリア</button>
+        <button class="btn btn-ghost" id="clearExtras_profile">縦断追加を全クリア</button>
       </div>
     </div>
 
@@ -5449,7 +5440,7 @@ viewProfile.innerHTML = `
               <td>${x.id}</td>
               <td>${metersToStaPitch(x.m, pitch, 3)}</td>
               <td><input data-ex-group="profile" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
-              <td class="right"><button type="button" class="btn btn-ghost" data-ex-group="profile" data-ex-del="${x.id}">削除</button></td>
+              <td class="right"><button class="btn btn-ghost" data-ex-group="profile" data-ex-del="${x.id}">削除</button></td>
             </tr>
           `).join("")}
         </tbody>
@@ -5827,7 +5818,7 @@ const cr = computeCrossSide("common", "right");
           <td class="right">${Number.isFinite(dzSlope)?dzSlope.toFixed(3):""}</td>
           <td class="right">${Number.isFinite(stepDz)?stepDz.toFixed(3):""}</td>
           <td class="right">${Number.isFinite(z)?z.toFixed(3):""}</td>
-          <td class="right"><button type="button" class="btn btn-ghost" data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-del="${r.id}">削除</button></td>
+          <td class="right"><button class="btn btn-ghost" data-xs-scope="${scope}"${staAttr} data-xs-side="${side}" data-xs-del="${r.id}">削除</button></td>
         </tr>
       `);
 
@@ -5860,7 +5851,7 @@ const cr = computeCrossSide("common", "right");
         </div>
         <div>
           <label>読み込み</label>
-          <button type="button" class="btn" id="btnCrossDxfImport">DXFを解析して反映</button>
+          <button class="btn" id="btnCrossDxfImport">DXFを解析して反映</button>
           <div id="crossDxfMsg" class="mini" style="margin-top:8px;"></div>
         </div>
       </div>
@@ -5872,8 +5863,8 @@ const cr = computeCrossSide("common", "right");
   </div>
   <div>
     <label>読み込み</label>
-    <button type="button" class="btn btn-ok" id="btnCrossJsonImport">JSONを反映</button>
-    <button type="button" class="btn" id="btnCrossJsonExport">横断JSONを書き出し</button>
+    <button class="btn btn-ok" id="btnCrossJsonImport">JSONを反映</button>
+    <button class="btn" id="btnCrossJsonExport">横断JSONを書き出し</button>
     <div id="crossJsonMsg" class="mini" style="margin-top:8px;"></div>
   </div>
 </div>
@@ -5891,7 +5882,7 @@ const cr = computeCrossSide("common", "right");
         </div>
         <div style="flex:1; min-width:200px;">
           <label>一括適用</label>
-          <button type="button" class="btn" id="applyBulkCrossEnd">横断範囲を一括更新</button>
+          <button class="btn" id="applyBulkCrossEnd">横断範囲を一括更新</button>
           <div class="mini" style="margin-top:6px;">
             <label class="mini"><input id="bulkAffectOverrides" type="checkbox" checked /> 測点別の例外にも適用</label>
           </div>
@@ -5925,10 +5916,10 @@ const cr = computeCrossSide("common", "right");
             ${renderCrossElemListHtml("right")}
           </div>
           <div class="row" style="margin-top:8px;">
-            <div style="flex:1; min-width:120px;"><button type="button" class="btn btn-ghost" data-xs-add="PAV" data-xs-side="right">＋ 路面(%)</button></div>
-            <div style="flex:1; min-width:120px;"><button type="button" class="btn btn-ghost" data-xs-add="STEP" data-xs-side="right">＋ 段差</button></div>
-            <div style="flex:1; min-width:120px;"><button type="button" class="btn btn-ghost" data-xs-add="SLOPE_H" data-xs-side="right">＋ 法面(H)</button></div>
-            <div style="flex:1; min-width:120px;"><button type="button" class="btn btn-ghost" data-xs-add="SLOPE_EXT" data-xs-side="right">＋ 法面(延長)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="PAV" data-xs-side="right">＋ 路面(%)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="STEP" data-xs-side="right">＋ 段差</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="SLOPE_H" data-xs-side="right">＋ 法面(H)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="SLOPE_EXT" data-xs-side="right">＋ 法面(延長)</button></div>
           </div>
         </div>
         <div>
@@ -5938,10 +5929,10 @@ const cr = computeCrossSide("common", "right");
             ${renderCrossElemListHtml("left")}
           </div>
           <div class="row" style="margin-top:8px;">
-            <div style="flex:1; min-width:120px;"><button type="button" class="btn btn-ghost" data-xs-add="PAV" data-xs-side="left">＋ 路面(%)</button></div>
-            <div style="flex:1; min-width:120px;"><button type="button" class="btn btn-ghost" data-xs-add="STEP" data-xs-side="left">＋ 段差</button></div>
-            <div style="flex:1; min-width:120px;"><button type="button" class="btn btn-ghost" data-xs-add="SLOPE_H" data-xs-side="left">＋ 法面(H)</button></div>
-            <div style="flex:1; min-width:120px;"><button type="button" class="btn btn-ghost" data-xs-add="SLOPE_EXT" data-xs-side="left">＋ 法面(延長)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="PAV" data-xs-side="left">＋ 路面(%)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="STEP" data-xs-side="left">＋ 段差</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="SLOPE_H" data-xs-side="left">＋ 法面(H)</button></div>
+            <div style="flex:1; min-width:120px;"><button class="btn btn-ghost" data-xs-add="SLOPE_EXT" data-xs-side="left">＋ 法面(延長)</button></div>
           </div>
         </div>
       </div>
@@ -5951,14 +5942,14 @@ const cr = computeCrossSide("common", "right");
         <div style="flex:1; min-width:220px;">
           <label>左右コピー</label>
           <div class="row" style="margin-top:0;">
-            <div style="flex:1; min-width:160px;"><button type="button" class="btn btn-ghost" id="xsCopy_r2l_all">右→左（全部）</button></div>
-            <div style="flex:1; min-width:180px;"><button type="button" class="btn btn-ghost" id="xsCopy_r2l_to">右→左（ここまで）</button></div>
-            <div style="flex:1; min-width:160px;"><button type="button" class="btn btn-ghost" id="xsCopy_r2l_row">右→左（行だけ）</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsCopy_r2l_all">右→左（全部）</button></div>
+            <div style="flex:1; min-width:180px;"><button class="btn btn-ghost" id="xsCopy_r2l_to">右→左（ここまで）</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsCopy_r2l_row">右→左（行だけ）</button></div>
           </div>
           <div class="row" style="margin-top:0;">
-            <div style="flex:1; min-width:160px;"><button type="button" class="btn btn-ghost" id="xsCopy_l2r_all">左→右（全部）</button></div>
-            <div style="flex:1; min-width:180px;"><button type="button" class="btn btn-ghost" id="xsCopy_l2r_to">左→右（ここまで）</button></div>
-            <div style="flex:1; min-width:160px;"><button type="button" class="btn btn-ghost" id="xsCopy_l2r_row">左→右（行だけ）</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsCopy_l2r_all">左→右（全部）</button></div>
+            <div style="flex:1; min-width:180px;"><button class="btn btn-ghost" id="xsCopy_l2r_to">左→右（ここまで）</button></div>
+            <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsCopy_l2r_row">左→右（行だけ）</button></div>
           </div>
           <div class="mini">「ここまで」は選択行を含めて置換（以降は残る）</div>
         </div>
@@ -5966,9 +5957,9 @@ const cr = computeCrossSide("common", "right");
         <div style="width:360px;">
           <label>テンプレ（現在測点のみ適用）</label>
           <div class="row" style="margin-top:0;">
-            <div style="flex:1; min-width:140px;"><button type="button" class="btn btn-ghost" id="xsTplSave">保存</button></div>
-            <div style="flex:1; min-width:140px;"><button type="button" class="btn btn-ghost" id="xsTplApply">適用</button></div>
-            <div style="flex:1; min-width:140px;"><button type="button" class="btn btn-ghost" id="xsTplManage">管理</button></div>
+            <div style="flex:1; min-width:140px;"><button class="btn btn-ghost" id="xsTplSave">保存</button></div>
+            <div style="flex:1; min-width:140px;"><button class="btn btn-ghost" id="xsTplApply">適用</button></div>
+            <div style="flex:1; min-width:140px;"><button class="btn btn-ghost" id="xsTplManage">管理</button></div>
           </div>
           <div class="mini" id="xsTplInfo"></div>
         </div>
@@ -5996,14 +5987,14 @@ const cr = computeCrossSide("common", "right");
         </div>
         <div>
           <label>操作</label>
-          <button type="button" class="btn" id="xsOverrideAddOrSelect">＋ 作成/選択</button>
+          <button class="btn" id="xsOverrideAddOrSelect">＋ 作成/選択</button>
           <div style="height:10px;"></div>
 
-          <button type="button" class="btn btn-ok" id="xsSetEndToTotal">終点=平面総延長（例外を作成/選択）</button>
+          <button class="btn btn-ok" id="xsSetEndToTotal">終点=平面総延長（例外を作成/選択）</button>
           <div class="mini" style="margin-top:6px;">横断の終点測点を平面総延長に合わせます</div>
           <div style="height:10px;"></div>
 
-          <button type="button" class="btn btn-ghost" id="xsOverrideDelete" ${hasSel?"":"disabled"}>例外を削除（共通に戻す）</button>
+          <button class="btn btn-ghost" id="xsOverrideDelete" ${hasSel?"":"disabled"}>例外を削除（共通に戻す）</button>
         </div>
       </div>
 
@@ -6019,7 +6010,7 @@ const cr = computeCrossSide("common", "right");
           </div>
           <div style="flex:1; min-width:260px;">
             <label>幅員適用（共通形状→アンカー以外を自動シフト）</label>
-            <button type="button" class="btn" id="applyOvrWidth">この例外に幅員を適用</button>
+            <button class="btn" id="applyOvrWidth">この例外に幅員を適用</button>
             <div class="mini" style="margin-top:6px;">※左右独立で適用。既存の例外形状を上書きします。</div>
           </div>
         </div>
@@ -6034,9 +6025,9 @@ const cr = computeCrossSide("common", "right");
               </table>
             </div>
             <div class="row">
-              <div style="flex:1; min-width:160px;"><button type="button" class="btn" id="addCrossSeg_ovr_right">＋ 右側区間を追加</button></div>
-              <div style="flex:1; min-width:160px;"><button type="button" class="btn btn-ghost" id="exampleCrossSeg_ovr_right">例を入れる</button></div>
-              <div style="flex:1; min-width:160px;"><button type="button" class="btn btn-ghost" id="clearCrossSeg_ovr_right">右側を全クリア</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn" id="addCrossSeg_ovr_right">＋ 右側区間を追加</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="exampleCrossSeg_ovr_right">例を入れる</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="clearCrossSeg_ovr_right">右側を全クリア</button></div>
             </div>
             <div class="mini">最外端：+${or.lastEnd.toFixed(3)} m / Z=${or.lastZ.toFixed(3)} m</div>
             ${warnHtml(or.warnings)}
@@ -6051,9 +6042,9 @@ const cr = computeCrossSide("common", "right");
               </table>
             </div>
             <div class="row">
-              <div style="flex:1; min-width:160px;"><button type="button" class="btn" id="addCrossSeg_ovr_left">＋ 左側区間を追加</button></div>
-              <div style="flex:1; min-width:160px;"><button type="button" class="btn btn-ghost" id="exampleCrossSeg_ovr_left">例を入れる</button></div>
-              <div style="flex:1; min-width:160px;"><button type="button" class="btn btn-ghost" id="clearCrossSeg_ovr_left">左側を全クリア</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn" id="addCrossSeg_ovr_left">＋ 左側区間を追加</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="exampleCrossSeg_ovr_left">例を入れる</button></div>
+              <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="clearCrossSeg_ovr_left">左側を全クリア</button></div>
             </div>
             <div class="mini">最外端：-${ol.lastEnd.toFixed(3)} m / Z=${ol.lastZ.toFixed(3)} m</div>
             ${warnHtml(ol.warnings)}
@@ -6089,9 +6080,9 @@ const cr = computeCrossSide("common", "right");
         </div>
 <div style="width:220px;">
           <label>操作</label>
-          <button type="button" class="btn" id="xsPreviewShow">表示</button>
+          <button class="btn" id="xsPreviewShow">表示</button>
           <div style="height:10px;"></div>
-          <button type="button" class="btn btn-ghost" id="xsPreviewUseSelected" ${hasSel?"":"disabled"}>選択中の例外を表示</button>
+          <button class="btn btn-ghost" id="xsPreviewUseSelected" ${hasSel?"":"disabled"}>選択中の例外を表示</button>
         </div>
         <div style="flex:1; min-width:260px;">
           <div class="mini" id="xsPreviewInfo"></div>
@@ -6126,7 +6117,7 @@ const cr = computeCrossSide("common", "right");
           <label>中心からの距離（m）</label>
           <input id="qOffset" type="number" step="0.001" min="0" value="0.000" />
           <div style="height:10px;"></div>
-          <button type="button" class="btn btn-ok" id="btnQueryElev">指定点を計算</button>
+          <button class="btn btn-ok" id="btnQueryElev">指定点を計算</button>
         </div>
       </div>
       <div id="qOut" class="mini" style="margin-top:10px;"></div>
@@ -6148,9 +6139,9 @@ const cr = computeCrossSide("common", "right");
           <textarea id="extraTokens_cross" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
         </div>
         <div>
-          <button type="button" class="btn" id="addExtras_cross">＋ 追加</button>
+          <button class="btn" id="addExtras_cross">＋ 追加</button>
           <div style="height:10px;"></div>
-          <button type="button" class="btn btn-ghost" id="clearExtras_cross">横断追加を全クリア</button>
+          <button class="btn btn-ghost" id="clearExtras_cross">横断追加を全クリア</button>
         </div>
       </div>
 
@@ -6164,7 +6155,7 @@ const cr = computeCrossSide("common", "right");
                 <td>${x.id}</td>
                 <td>${metersToStaPitch(x.m, pitch, 3)}</td>
                 <td><input data-ex-group="cross" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
-                <td class="right"><button type="button" class="btn btn-ghost" data-ex-group="cross" data-ex-del="${x.id}">削除</button></td>
+                <td class="right"><button class="btn btn-ghost" data-ex-group="cross" data-ex-del="${x.id}">削除</button></td>
               </tr>
             `).join("")}
           </tbody>
@@ -7101,9 +7092,9 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
           <textarea id="extraTokens_output" placeholder="例：101.527 / 5+1.527 / 0+50.000 など"></textarea>
         </div>
         <div>
-          <button type="button" class="btn" id="addExtras_output">＋ 追加</button>
+          <button class="btn" id="addExtras_output">＋ 追加</button>
           <div style="height:10px;"></div>
-          <button type="button" class="btn btn-ghost" id="clearExtras_output">統合追加を全クリア</button>
+          <button class="btn btn-ghost" id="clearExtras_output">統合追加を全クリア</button>
         </div>
       </div>
 
@@ -7117,7 +7108,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
                 <td>${x.id}</td>
                 <td>${metersToStaPitch(x.m, pitch, 3)}</td>
                 <td><input data-ex-group="output" data-ex-id="${x.id}" type="number" step="0.001" value="${x.m}" /></td>
-                <td class="right"><button type="button" class="btn btn-ghost" data-ex-group="output" data-ex-del="${x.id}">削除</button></td>
+                <td class="right"><button class="btn btn-ghost" data-ex-group="output" data-ex-del="${x.id}">削除</button></td>
               </tr>
             `).join("")}
           </tbody>
@@ -7134,7 +7125,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
           測点表示：<b>k+rem</b>（pitch=${pitch}m）
         </div>
         <div>
-          <button type="button" class="btn btn-ok" id="dlCSV" ${stBuild.stations.length ? "" : "disabled"}>CSVダウンロード</button>
+          <button class="btn btn-ok" id="dlCSV" ${stBuild.stations.length ? "" : "disabled"}>CSVダウンロード</button>
           <div class="mini" style="margin-top:8px;">ファイル名：${state.projectName}_中心線.csv</div>
         </div>
         <div class="mini">列：測点 / 追加距離 / N / E / Az / GL（縦断ON時）</div>
@@ -7173,9 +7164,9 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
           .xrf は UTF-8
         </div>
         <div>
-          <button type="button" class="btn btn-ok" id="dlPlanSIM" ${stBuild.stations.length ? "" : "disabled"}>SIMA(.sim)ダウンロード</button>
+          <button class="btn btn-ok" id="dlPlanSIM" ${stBuild.stations.length ? "" : "disabled"}>SIMA(.sim)ダウンロード</button>
           <div style="height:10px;"></div>
-          <button type="button" class="btn btn-ok" id="dlPlanXRF" ${stBuild.stations.length ? "" : "disabled"}>XRF(.xrf)ダウンロード</button>
+          <button class="btn btn-ok" id="dlPlanXRF" ${stBuild.stations.length ? "" : "disabled"}>XRF(.xrf)ダウンロード</button>
           <div class="mini" style="margin-top:8px;">
             ファイル名：${state.projectName}_plan.sim / ${state.projectName}_plan.xrf
           </div>
@@ -7383,12 +7374,12 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
           ただし端末の整理で消える可能性はあるので、節目でJSON保存がおすすめ。
         </div>
         <div>
-          <button type="button" class="btn btn-ok" id="saveJSON">JSONを書き出し（バックアップ）</button>
+          <button class="btn btn-ok" id="saveJSON">JSONを書き出し（バックアップ）</button>
           <div style="height:10px;"></div>
           <input id="loadJSON" type="file" accept="application/json" />
         </div>
         <div>
-          <button type="button" class="btn btn-ghost" id="clearLocal">iPad内保存を削除（注意）</button>
+          <button class="btn btn-ghost" id="clearLocal">iPad内保存を削除（注意）</button>
           <div class="mini" style="margin-top:8px;">※削除すると復元できません</div>
         </div>
       </div>
@@ -7511,10 +7502,8 @@ function buildExportFileName(kind){
   try{ localStorage.setItem("lastExportBaseName", base); }catch(e){}
   return `${base}_${kind}_${_tsCompact()}.json`;
 }
-_${kind}_${_tsCompact()}.json`;
 }
 
 </script>
 </body>
 </html>
-
