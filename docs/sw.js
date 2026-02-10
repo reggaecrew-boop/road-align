@@ -1,5 +1,5 @@
 // sw.js (v18.10.7_0)
-const CACHE_NAME = "road-align-cache-v18.10.7_0";
+const CACHE_NAME = "road-align-pwa-v18_10_32";
 const CORE_ASSETS = [
   "./",
   "./index.html",
