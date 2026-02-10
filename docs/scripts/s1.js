@@ -2365,6 +2365,12 @@ const ensureCrossState = ()=>{
     state.cross.ui = { selectedStaKey: "" };
   }
   if (typeof state.cross.ui.selectedStaKey !== "string") state.cross.ui.selectedStaKey = "";
+  if (typeof state.cross.ui.elemMode !== 'string') state.cross.ui.elemMode = 'common';
+  if (state.cross.ui.elemMode !== 'common' && state.cross.ui.elemMode !== 'override') state.cross.ui.elemMode = 'common';
+  if (typeof state.cross.ui.editStaTok !== 'string') state.cross.ui.editStaTok = '';
+  if (typeof state.cross.ui.queryTok !== 'string') state.cross.ui.queryTok = '';
+  if (typeof state.cross.ui.previewMode !== 'string') state.cross.ui.previewMode = 'effective';
+
 
   // taper
   if (!state.cross.taper || typeof state.cross.taper !== 'object' || Array.isArray(state.cross.taper)) {
@@ -2431,6 +2437,9 @@ if (!Number.isFinite(obj.nextSegId)) {
   if (!state.cross.elemCommon || typeof state.cross.elemCommon !== 'object' || Array.isArray(state.cross.elemCommon)) {
     state.cross.elemCommon = { right:{ items:[], nextId:1 }, left:{ items:[], nextId:1 } };
   }
+  if (!state.cross.elemOverrides || typeof state.cross.elemOverrides !== 'object' || Array.isArray(state.cross.elemOverrides)) {
+    state.cross.elemOverrides = {};
+  }
   const ensureElemSide = (sideKey)=>{
     const es = state.cross.elemCommon[sideKey];
     if (!es || typeof es !== 'object' || Array.isArray(es)) state.cross.elemCommon[sideKey] = { items:[], nextId:1 };
@@ -2441,15 +2450,6 @@ if (!Number.isFinite(obj.nextSegId)) {
     }
   };
   ensureElemSide('right'); ensureElemSide('left');
-
-  // Elem overrides (for station-specific editing via unified element UI)
-  if (!state.cross.elemOverrides || typeof state.cross.elemOverrides !== 'object' || Array.isArray(state.cross.elemOverrides)) {
-    state.cross.elemOverrides = {};
-  }
-  if (!state.cross.ui || typeof state.cross.ui !== 'object') state.cross.ui = {};
-  if (state.cross.ui.elemMode !== 'common' && state.cross.ui.elemMode !== 'override') state.cross.ui.elemMode = 'common';
-  if (typeof state.cross.ui.editStaTok !== 'string') state.cross.ui.editStaTok = '';
-
 
   if (!state.cross.templates || typeof state.cross.templates !== 'object' || Array.isArray(state.cross.templates)) {
     state.cross.templates = { items: [], nextId: 1 };
@@ -2601,37 +2601,43 @@ const syncCrossCommonSegsFromElems = ()=>{
   const xr = getXrangeForStaKey("");
   state.cross.right.segs = elemsToSegs(state.cross.elemCommon.right.items, 'right', xr.R);
   state.cross.left.segs  = elemsToSegs(state.cross.elemCommon.left.items, 'left', xr.L);
-  state.cross.right.nextSegId = Math.max(0, ...state.cross.right.segs.map(r=>r.id||0)) + 1;
-  state.cross.left.nextSegId  = Math.max(0, ...state.cross.left.segs.map(r=>r.id||0)) + 1;
-
+  state.cross.ri
 
 const ensureElemOverrideInitialized = (staKey)=>{
-  ensureCrossOverrideInitialized(staKey);
+  ensureCrossOverride(staKey);
   if (!state.cross.elemOverrides || typeof state.cross.elemOverrides !== 'object') state.cross.elemOverrides = {};
   if (!state.cross.elemOverrides[staKey] || typeof state.cross.elemOverrides[staKey] !== 'object') {
     state.cross.elemOverrides[staKey] = { right:{ items:[], nextId:1 }, left:{ items:[], nextId:1 } };
   }
   for (const side of ['right','left']){
-    const es = state.cross.elemOverrides[staKey][side];
-    if (!es || typeof es !== 'object') state.cross.elemOverrides[staKey][side] = { items:[], nextId:1 };
+    const store = state.cross.elemOverrides[staKey][side];
+    if (!store || typeof store !== 'object') state.cross.elemOverrides[staKey][side] = { items:[], nextId:1 };
     if (!Array.isArray(state.cross.elemOverrides[staKey][side].items)) state.cross.elemOverrides[staKey][side].items = [];
-    if (!Number.isFinite(Number(state.cross.elemOverrides[staKey][side].nextId))) {
-      const mx = Math.max(0, ...state.cross.elemOverrides[staKey][side].items.map(it=>Number(it?.id)||0));
-      state.cross.elemOverrides[staKey][side].nextId = mx + 1;
+    // initialize from existing override segs if empty
+    const items = state.cross.elemOverrides[staKey][side].items;
+    const oSegs = (state.cross.overrides?.[staKey]?.[side]?.segs||[]);
+    if (!items.length && Array.isArray(oSegs) && oSegs.length) {
+      state.cross.elemOverrides[staKey][side].items = buildElemFromSegs(oSegs);
     }
+    // if still empty, start from common elements (template)
+    if (!state.cross.elemOverrides[staKey][side].items.length) {
+      ensureElemCommonInitialized();
+      state.cross.elemOverrides[staKey][side].items = deepCopy(state.cross.elemCommon[side].items||[]);
+    }
+    const mx = Math.max(0, ...state.cross.elemOverrides[staKey][side].items.map(it=>Number(it?.id)||0));
+    state.cross.elemOverrides[staKey][side].nextId = mx + 1;
   }
 };
 
 const getActiveElemMode = ()=> (state.cross.ui?.elemMode === 'override') ? 'override' : 'common';
 const getActiveStaKeyForElem = ()=>{
   if (getActiveElemMode() !== 'override') return '';
-  const k = String(state.cross.ui?.selectedStaKey||'').trim();
-  return k;
+  return String(state.cross.ui?.selectedStaKey||'').trim();
 };
 
 const getActiveElemStore = (side)=>{
   const mode = getActiveElemMode();
-  if (mode === 'override'){
+  if (mode === 'override') {
     const k = getActiveStaKeyForElem();
     if (!k) return null;
     ensureElemOverrideInitialized(k);
@@ -2644,16 +2650,15 @@ const getActiveElemStore = (side)=>{
 const syncCrossOverrideSegsFromElems = (staKey)=>{
   ensureElemOverrideInitialized(staKey);
   const xr = getXrangeForStaKey(staKey);
-  const ovr = state.cross.overrides[staKey];
-  ovr.right.segs = elemsToSegs(state.cross.elemOverrides[staKey].right.items, 'right', xr.R);
-  ovr.left.segs  = elemsToSegs(state.cross.elemOverrides[staKey].left.items, 'left', xr.L);
-  ovr.right.nextSegId = Math.max(0, ...ovr.right.segs.map(r=>r.id||0)) + 1;
-  ovr.left.nextSegId  = Math.max(0, ...ovr.left.segs.map(r=>r.id||0)) + 1;
+  state.cross.overrides[staKey].right.segs = elemsToSegs(state.cross.elemOverrides[staKey].right.items, 'right', xr.R);
+  state.cross.overrides[staKey].left.segs  = elemsToSegs(state.cross.elemOverrides[staKey].left.items, 'left', xr.L);
+  state.cross.overrides[staKey].right.nextSegId = Math.max(0, ...state.cross.overrides[staKey].right.segs.map(r=>r.id||0)) + 1;
+  state.cross.overrides[staKey].left.nextSegId  = Math.max(0, ...state.cross.overrides[staKey].left.segs.map(r=>r.id||0)) + 1;
 };
 
 const syncCrossActiveSegsFromElems = ()=>{
   const mode = getActiveElemMode();
-  if (mode === 'override'){
+  if (mode === 'override') {
     const k = getActiveStaKeyForElem();
     if (!k) return;
     syncCrossOverrideSegsFromElems(k);
@@ -2661,6 +2666,8 @@ const syncCrossActiveSegsFromElems = ()=>{
     syncCrossActiveSegsFromElems();
   }
 };
+ght.nextSegId = Math.max(0, ...state.cross.right.segs.map(r=>r.id||0)) + 1;
+  state.cross.left.nextSegId  = Math.max(0, ...state.cross.left.segs.map(r=>r.id||0)) + 1;
 };
 
 
@@ -3025,13 +3032,19 @@ const widenCrossSegsFromCommon = (commonSegs, targetW, anchor)=>{
   return cleaned.map((r,i)=>Object.assign({ id: i+1 }, r));
 };
 
-const getEffectiveCrossSegsAt = (m, side)=>{
+const getEffectiveCrossSegsAt = (m, side, mode='effective')=>{
+  // mode:
+  //  - 'effective' : apply overrides + taper (actual design at station)
+  //  - 'common'    : ignore overrides, apply taper only (template preview)
+  //  - 'override'  : prefer override at station if exists, otherwise common (for editing override station)
   ensureCrossState();
   const key = Number(m).toFixed(3);
   const hasOvr = !!(state.cross.overrides && state.cross.overrides[key]);
   const taperOn = !!(state.cross.taper && state.cross.taper.enabled);
 
-  if (hasOvr) {
+  const ignoreOvr = (mode === 'common');
+
+  if (!ignoreOvr && hasOvr) {
     const segs = (state.cross.overrides[key][side]?.segs||[]).slice();
     const info = { source: '例外', width: computeCrossRowsFromSegs(segs).lastEnd || 0, mode: '制御点' };
     return { segs, info };
@@ -5822,7 +5835,7 @@ const cr = computeCrossSide("common", "right");
 
       <div class="grid grid-2" style="margin-top:10px;">
         <div>
-          <div class="pill">右側（+）エレメント（${getActiveElemMode()==="override" ? "例外" : "共通"}）</div>
+          <div class="pill">右側（+）エレメント（共通）</div>
           <div class="mini">行をタップで選択（iPhone互換のため並べ替えは一旦停止）</div>
           <div id="xsElemList_right" class="xsElemList">
             ${renderCrossElemListHtml("right")}
@@ -5835,7 +5848,7 @@ const cr = computeCrossSide("common", "right");
           </div>
         </div>
         <div>
-          <div class="pill">左側（-）エレメント（${getActiveElemMode()==="override" ? "例外" : "共通"}）</div>
+          <div class="pill">左側（-）エレメント（共通）</div>
           <div class="mini">行をタップで選択（iPhone互換のため並べ替えは一旦停止）</div>
           <div id="xsElemList_left" class="xsElemList">
             ${renderCrossElemListHtml("left")}
@@ -5880,27 +5893,27 @@ const cr = computeCrossSide("common", "right");
       <div class="mini">例：中心→3.000m -2.000% / 3.000→4.500m 0.000% / 4.500→5.000m -1.000%</div>
 
       <div class="sep"></div>
-      <h2 style="margin-top:0;">横断エレメント作成（共通 / 例外）</h2>
-      <div class="mini">エレメント入力はここに統合しました。「共通（全測点）」と「例外（測点別）」を切り替えて編集できます。プレビューは選択中（または指定点）の断面を自動表示します。</div>
+      <h2 style="margin-top:0;">横断エレメント作成（標準 / 例外）</h2>
+      <div class="mini">横断エレメント作成はここに統合しました。「標準（テンプレ）」と「例外（測点別）」を切り替えて編集します。プレビューは選択中（または指定点）の断面を自動表示します。</div>
 
       <div class="grid grid-3" style="margin-top:10px;">
         <div>
           <label>編集モード</label>
           <select id="xsElemMode">
-            <option value="common" ${((state.cross.ui?.elemMode||'common')==='common')?'selected':''}>共通（全測点）</option>
-            <option value="override" ${((state.cross.ui?.elemMode||'common')==='override')?'selected':''}>例外（測点別）</option>
+            <option value="common" ${((state.cross.ui?.elemMode||'common')==='common')?'selected':''}>標準（テンプレ）を編集</option>
+            <option value="override" ${((state.cross.ui?.elemMode||'common')==='override')?'selected':''}>例外（測点別）を編集</option>
           </select>
-          <div class="mini" style="margin-top:6px;">例外モードでは「対象測点」を作成/選択して編集します</div>
+          <div class="mini" style="margin-top:6px;">例外モードでは「対象測点」を選ぶと、その測点の例外エレメントが編集欄に出ます</div>
         </div>
 
         <div>
-          <label>対象測点（m / k+rem）</label>
-          <input id="xsOverrideSta" type="text" placeholder="例：100.000 / 5+0.000" value="${(state.cross.ui?.editStaTok||'')}" />
-          <div class="mini">pitch=${pitch}m（空白のときはプレビュー表示なし）</div>
+          <label>対象測点（プレビュー基準 / 空白なら表示なし）</label>
+          <input id="xsEditSta" type="text" placeholder="例：110.000 / 1+10.000" value="${(state.cross.ui?.editStaTok||'')}" />
+          <div class="mini">pitch=${pitch}m</div>
         </div>
 
         <div>
-          <label>既存の例外</label>
+          <label>作成済み横断測点（例外）</label>
           <select id="xsOverrideSel">
             <option value="">（選択なし）</option>
             ${ovOptions}
@@ -5909,7 +5922,7 @@ const cr = computeCrossSide("common", "right");
             <div style="flex:1; min-width:160px;"><button class="btn" id="xsOverrideAddOrSelect">＋ 作成/選択</button></div>
             <div style="flex:1; min-width:160px;"><button class="btn btn-ghost" id="xsOverrideDelete" ${hasSel?"":"disabled"}>例外を削除</button></div>
           </div>
-          <div class="mini">例外モードで選択中の測点が編集対象になります</div>
+          <div class="mini">例外モードで選択中の測点が編集対象（測点別修正）になります</div>
         </div>
       </div>
 <div class="sep"></div>
@@ -6274,9 +6287,12 @@ const cr = computeCrossSide("common", "right");
     aTo.nextId = Math.max(0, ...aTo.items.map(it=>Number(it.id)||0)) + 1;
   };
   const copyRow = (from,to)=>{
+    const aFrom = getActiveElemStore(from);
+    const aTo = getActiveElemStore(to);
+    if (!aFrom || !aTo) return;
     const fromSel = Number(state.cross.ui.elemSel[from]||0);
-    const srcArr = state.cross.elemCommon[from].items||[];
-    const dstArr = state.cross.elemCommon[to].items||[];
+    const srcArr = aFrom.items||[];
+    const dstArr = aTo.items||[];
     const srcIdx = srcArr.findIndex(it=>Number(it.id)===fromSel);
     if (srcIdx<0) { alert('コピー元の行を選択してください'); return; }
     const src = deepCopy(srcArr[srcIdx]);
@@ -6360,7 +6376,7 @@ const cr = computeCrossSide("common", "right");
     // target STA: selected override key or preview input
     let key = String(state.cross.ui.selectedStaKey||'').trim();
     if (!key){
-      const tok = String(state.cross.ui.previewTok || state.cross.ui.editStaTok || '').trim();
+      const tok = String(document.getElementById('xsEditSta')?.value || state.cross.ui.previewTok || '').trim();
       if (!tok){ alert('適用先の測点が未指定です（対象測点を入力するか、例外を選択してください）'); return; }
       try{
         const m = parseSta100(tok);
@@ -6406,11 +6422,39 @@ const cr = computeCrossSide("common", "right");
   };
 
 
-  // 例外：選択
+  
+  // エレメント編集モード（標準/例外）
+  const modeEl = document.getElementById('xsElemMode');
+  if (modeEl) {
+    modeEl.onchange = (e)=>{
+      ensureCrossState();
+      state.cross.ui.elemMode = (String(e.target.value)==='override') ? 'override' : 'common';
+      state.cross.ui.queryTok = '';
+      saveState();
+      render();
+    };
+  }
+
+  // 対象測点（プレビュー基準：標準モードで使用。空白なら表示なし）
+  const editStaEl = document.getElementById('xsEditSta');
+  if (editStaEl) {
+    const commit = ()=>{
+      ensureCrossState();
+      state.cross.ui.editStaTok = String(editStaEl.value||'').trim();
+      // 標準編集に戻したときに使えるよう保持
+      state.cross.ui.queryTok = '';
+      saveState();
+      render();
+    };
+    editStaEl.onchange = commit;
+    editStaEl.onblur = commit;
+  }
+// 例外：選択
   const selEl = document.getElementById("xsOverrideSel");
   if (selEl) {
     selEl.value = selKey;
     selEl.onchange = (e)=>{
+      ensureCrossState();
       state.cross.ui.selectedStaKey = e.target.value || "";
       if (state.cross.ui.selectedStaKey) state.cross.ui.elemMode = 'override';
       state.cross.ui.queryTok = '';
@@ -6426,15 +6470,18 @@ const cr = computeCrossSide("common", "right");
       const pitchNow = Math.max(1, Math.floor(state.staPitch||1));
       const sel = (document.getElementById("xsOverrideSel")?.value || "").trim();
       if (sel) {
+        ensureCrossState();
         state.cross.ui.selectedStaKey = sel;
         state.cross.ui.elemMode = 'override';
         state.cross.ui.queryTok = '';
+        // init elem override from existing segs/common
+        ensureElemOverrideInitialized(sel);
         saveState();
         render();
         return;
       }
-      const tok = (document.getElementById("xsOverrideSta")?.value || "").trim();
-      if (!tok) { alert("測点を入力してください"); return; }
+      const tok = (document.getElementById("xsEditSta")?.value || "").trim();
+      if (!tok) { alert("対象測点を入力してください"); return; }
       let m;
       try {
         m = parseTokenToM(tok, pitchNow);
@@ -6444,12 +6491,12 @@ const cr = computeCrossSide("common", "right");
       }
       const key = Number(m.toFixed(3));
       const k = key.toFixed(3);
+      ensureCrossState();
       ensureCrossOverride(k);
-      state.cross.ui.selectedStaKey = k;
       state.cross.ui.elemMode = 'override';
+      state.cross.ui.selectedStaKey = k;
       state.cross.ui.queryTok = '';
-      // keep last typed token for common preview too
-      state.cross.ui.editStaTok = String(document.getElementById("xsOverrideSta")?.value||'').trim();
+      ensureElemOverrideInitialized(k);
       saveState();
       render();
     };
@@ -6463,8 +6510,8 @@ const cr = computeCrossSide("common", "right");
       if (!k) return;
       if (!confirm(`例外（${k}m）を削除して共通に戻します。よいですか？`)) return;
       delete state.cross.overrides[k];
+      if (state.cross.elemOverrides) delete state.cross.elemOverrides[k];
       state.cross.ui.selectedStaKey = "";
-      // stay in common mode after deletion
       state.cross.ui.elemMode = 'common';
       state.cross.ui.queryTok = '';
       saveState();
@@ -6473,35 +6520,7 @@ const cr = computeCrossSide("common", "right");
   }
 
 
-  
-  // エレメント編集モード（共通/例外）
-  const modeEl = document.getElementById('xsElemMode');
-  if (modeEl) {
-    modeEl.onchange = (e)=>{
-      ensureCrossState();
-      state.cross.ui.elemMode = (String(e.target.value)==='override') ? 'override' : 'common';
-      // query preview overrides preview; clear it when user edits
-      state.cross.ui.queryTok = '';
-      saveState();
-      render();
-    };
-  }
-
-  // 対象測点（プレビュー基準）
-  const editStaEl = document.getElementById('xsOverrideSta');
-  if (editStaEl) {
-    const commit = ()=>{
-      ensureCrossState();
-      state.cross.ui.editStaTok = String(editStaEl.value||'').trim();
-      state.cross.ui.queryTok = '';
-      saveState();
-      render();
-    };
-    editStaEl.onchange = commit;
-    editStaEl.onblur = commit;
-    editStaEl.oninput = ()=>{ /*軽く*/ };
-  }
-bindCrossSlopeUI(viewCross);
+  bindCrossSlopeUI(viewCross);
 
   // taper settings
   const cbTaper = document.getElementById('xsTaperEnabled');
@@ -6538,7 +6557,7 @@ bindCrossSlopeUI(viewCross);
   }
 
   // preview
-  const drawPreview = (tok)=>{
+  const drawPreview = (tok, previewMode='effective')=>{
     const infoEl = document.getElementById('xsPreviewInfo');
     const tblEl = document.getElementById('xsPreviewTable');
     const canvas = document.getElementById('xsCanvas');
@@ -6554,8 +6573,8 @@ bindCrossSlopeUI(viewCross);
     }
     m = clamp(m, 0, res.total||0);
 
-    const R = getEffectiveCrossSegsAt(m, 'right');
-    const L = getEffectiveCrossSegsAt(m, 'left');
+    const R = getEffectiveCrossSegsAt(m, 'right', previewMode);
+    const L = getEffectiveCrossSegsAt(m, 'left', previewMode);
 
     const rCalc = computeCrossRowsFromSegs(R.segs);
     const lCalc = computeCrossRowsFromSegs(L.segs);
@@ -6761,6 +6780,69 @@ bindCrossSlopeUI(viewCross);
         </div>
       `;
 
+
+      // element view (read-only): show segments at this station (for checking slope/changes)
+      const elemViewEl = document.getElementById('xsPreviewElemView');
+      if (elemViewEl) {
+        const mkRows = (eff, sideLabel)=>{
+          const segs = (eff.segs||[]).slice().sort((a,b)=>(+a.end)-(+b.end));
+          const rows = segs.map(r=>`<tr><td class="right">${(+r.end).toFixed(3)}</td><td class="right">${(+r.slopePct).toFixed(3)}</td><td class="right">${(Number(r.stepDz)||0).toFixed(3)}</td></tr>`).join('');
+          const w = computeCrossRowsFromSegs(segs).lastEnd || 0;
+          const src = eff.info?.source || '';
+          const modeTxt = eff.info?.mode || '';
+          return `
+            <div class="mini"><b>${sideLabel}</b> / 幅員=${w.toFixed(3)}m / ${escapeHtml(src)} ${modeTxt?('('+escapeHtml(modeTxt)+')'):''}</div>
+            <div style="overflow:auto; margin-top:6px;">
+              <table>
+                <thead><tr><th class="right">区間終点(m)</th><th class="right">勾配(%)</th><th class="right">段差(m)</th></tr></thead>
+                <tbody>${rows || `<tr><td colspan="3" class="mini">(定義なし)</td></tr>`}</tbody>
+              </table>
+            </div>
+          `;
+        };
+        const key = Number(m).toFixed(3);
+        const isQuery = !!String(state.cross.ui.queryTok||'').trim();
+        const promoteBtn = isQuery ? `<div class="row" style="margin-top:8px;">
+          <button class="btn" id="xsPromoteQueryToOverride" data-stakey="${key}">この測点を編集対象にする（例外として扱う）</button>
+          <div class="mini" style="margin-left:10px;">※押したときだけ例外を作成します（普段は参照のみ）</div>
+        </div>` : '';
+        elemViewEl.innerHTML = `
+          <div class="sep"></div>
+          <div class="mini"><b>エレメント表示（参照のみ）</b>：指定点で入力した任意測点もここに表示します</div>
+          ${promoteBtn}
+          ${mkRows(R, '右(+)')}
+          <div style="height:10px;"></div>
+          ${mkRows(L, '左(-)')}
+        `;
+
+        const promote = document.getElementById('xsPromoteQueryToOverride');
+        if (promote) promote.onclick = ()=>{
+          const staKey = String(promote.dataset.stakey||'').trim();
+          if (!staKey) return;
+          ensureCrossState();
+          // create/refresh override from current effective segs (at this station)
+          ensureCrossOverride(staKey);
+          state.cross.overrides[staKey].right.segs = deepCopy(R.segs||[]);
+          state.cross.overrides[staKey].left.segs  = deepCopy(L.segs||[]);
+          state.cross.overrides[staKey].right.nextSegId = Math.max(0, ...state.cross.overrides[staKey].right.segs.map(r=>r.id||0)) + 1;
+          state.cross.overrides[staKey].left.nextSegId  = Math.max(0, ...state.cross.overrides[staKey].left.segs.map(r=>r.id||0)) + 1;
+
+          // switch to override editing mode
+          state.cross.ui.elemMode = 'override';
+          state.cross.ui.selectedStaKey = staKey;
+          state.cross.ui.queryTok = ''; // back to edit-preview
+          // init elem overrides from segs
+          ensureElemOverrideInitialized(staKey);
+          state.cross.elemOverrides[staKey].right.items = buildElemFromSegs(state.cross.overrides[staKey].right.segs);
+          state.cross.elemOverrides[staKey].left.items  = buildElemFromSegs(state.cross.overrides[staKey].left.segs);
+          state.cross.elemOverrides[staKey].right.nextId = Math.max(0, ...state.cross.elemOverrides[staKey].right.items.map(it=>Number(it.id)||0)) + 1;
+          state.cross.elemOverrides[staKey].left.nextId  = Math.max(0, ...state.cross.elemOverrides[staKey].left.items.map(it=>Number(it.id)||0)) + 1;
+
+          saveState();
+          render();
+        };
+      }
+
       // click to highlight
       tblEl.onclick = (ev)=>{
         const tr = ev.target.closest('tr[data-pick-key]');
@@ -6768,63 +6850,39 @@ bindCrossSlopeUI(viewCross);
         const k = tr.getAttribute('data-pick-key');
         state.cross.ui.previewPickKey = k;
         saveState();
-        if(state.cross.ui.previewTok) drawPreview(state.cross.ui.previewTok);
+        if (state.cross.ui.previewTok) drawPreview(state.cross.ui.previewTok, state.cross.ui.previewMode||'effective');
       };
 
       // cache for CSV export
       const qpCache = (state.cross?.ui?.queryPoint && Math.abs((state.cross.ui.queryPoint.m||0) - m) < 1e-6) ? state.cross.ui.queryPoint : null;
-      
-      // element view (read-only): effective segments at this station (for checking slope/changes)
-      const elemViewEl = document.getElementById('xsPreviewElemView');
-      if (elemViewEl) {
-        const fmtSide = (sideKey, eff)=>{
-          const w = computeCrossRowsFromSegs(eff.segs).lastEnd || 0;
-          const src = eff.source || '';
-          const rows = (eff.segs||[]).slice().sort((a,b)=>(+a.end)-(+b.end)).map(r=>{
-            const end = (+r.end).toFixed(3);
-            const g = (+r.slopePct).toFixed(3);
-            return `<tr><td class="right">${end}</td><td class="right">${g}</td></tr>`;
-          }).join('');
-          return `
-            <div class="mini"><b>${sideKey==='right'?'右(+)':'左(-)'}</b> / 幅員=${w.toFixed(3)}m / ${escapeHtml(src)}</div>
-            <div style="overflow:auto; margin-top:6px;">
-              <table>
-                <thead><tr><th class="right">区間終点(m)</th><th class="right">勾配(%)</th></tr></thead>
-                <tbody>${rows || `<tr><td colspan="2" class="mini">(定義なし)</td></tr>`}</tbody>
-              </table>
-            </div>
-          `;
-        };
-        elemViewEl.innerHTML = `
-          <div class="sep"></div>
-          <div class="mini"><b>エレメント表示（参照のみ）</b>：指定点で入力した任意測点もここに表示します</div>
-          ${fmtSide('right', R)}
-          <div style="height:8px;"></div>
-          ${fmtSide('left', L)}
-        `;
-      }
-state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX: ref.x, baseZ: ref.z, pts: polyShift, landmarks, reps, zc, queryPoint: qpCache };
+      state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX: ref.x, baseZ: ref.z, pts: polyShift, landmarks, reps, zc, queryPoint: qpCache };
     } else {
     }
   };
 
-  // プレビューは自動追従（手入力欄は廃止）
-  const computePreviewTok = ()=>{
+  // プレビューは自動追従（測点選択UIなし）
+  const computePreviewTokAndMode = ()=>{
     ensureCrossState();
     const q = String(state.cross.ui.queryTok||'').trim();
-    if (q) return q;
-    if (getActiveElemMode()==='override') {
+    if (q) return { tok:q, mode:'effective' }; // 指定点：実際の断面（例外/割付含む）
+    const elemMode = (state.cross.ui.elemMode==='override') ? 'override' : 'common';
+    if (elemMode==='override'){
       const k = String(state.cross.ui.selectedStaKey||'').trim();
-      if (k) return k;
+      if (k) return { tok:k, mode:'override' }; // 例外編集：その測点の例外断面
+      return { tok:'', mode:'override' };
     }
+    // common: use typed STA; blank => no preview
     const t = String(state.cross.ui.editStaTok||'').trim();
-    return t;
+    if (!t) return { tok:'', mode:'common' };
+    return { tok:t, mode:'common' }; // 標準編集：例外を無視してテンプレ断面を表示
   };
 
-  const tok = computePreviewTok();
-  state.cross.ui.previewTok = tok;
+  const pv = computePreviewTokAndMode();
+  state.cross.ui.previewTok = pv.tok;
+  state.cross.ui.previewMode = pv.mode;
   saveState();
-  if (tok) drawPreview(tok);
+
+  if (pv.tok) drawPreview(pv.tok, pv.mode);
   else {
     // clear when empty
     const infoEl = document.getElementById('xsPreviewInfo');
@@ -6845,11 +6903,11 @@ state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX
   // base/labels/export (Phase2)
   const baseSel = document.getElementById('xsBaseSel');
   if (baseSel) {
-    baseSel.onchange = ()=>{ ensureCrossState(); state.cross.ui.previewBaseKey = baseSel.value; saveState(); if(state.cross.ui.previewTok) drawPreview(state.cross.ui.previewTok); };
+    baseSel.onchange = ()=>{ ensureCrossState(); state.cross.ui.previewBaseKey = baseSel.value; saveState(); if (state.cross.ui.previewTok) drawPreview(state.cross.ui.previewTok, state.cross.ui.previewMode||'effective'); };
   }
   const chkLbl = document.getElementById('xsShowLabels');
   if (chkLbl) {
-    chkLbl.onchange = ()=>{ if(state.cross.ui.previewTok) drawPreview(state.cross.ui.previewTok); };
+    chkLbl.onchange = ()=>{ if (state.cross.ui.previewTok) drawPreview(state.cross.ui.previewTok, state.cross.ui.previewMode||'effective'); };
   }
 
   const tblRep = document.getElementById('xsPreviewTable');
@@ -6862,7 +6920,7 @@ state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX
       ensureCrossState();
       state.cross.ui.previewPickKey = key;
       saveState();
-      if(state.cross.ui.previewTok) drawPreview(state.cross.ui.previewTok);
+      if (state.cross.ui.previewTok) drawPreview(state.cross.ui.previewTok, state.cross.ui.previewMode||'effective');
     };
   }
 
@@ -6917,7 +6975,7 @@ state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX
   if (btnSetEnd) {
     btnSetEnd.onclick = ()=>{
       const total = Number(res.total||0);
-      const inp = document.getElementById('xsOverrideSta');
+      const inp = document.getElementById('xsEditSta');
       if (inp) inp.value = total.toFixed(3);
       const btn = document.getElementById('xsOverrideAddOrSelect');
       if (btn) btn.click();
@@ -6925,14 +6983,6 @@ state.cross.ui.previewCache = { m, baseKey: ref.key, baseLabel: ref.label, baseX
   }
 
   // 初期描画
-  if (inpPrev && (!inpPrev.value || !inpPrev.value.trim())) {
-    const k = state.cross.ui.selectedStaKey;
-    inpPrev.value = k || '0.000';
-    ensureCrossState();
-    state.cross.ui.previewTok = inpPrev.value;
-    saveState();
-  }
-  if (inpPrev) drawPreview(inpPrev.value);
 
   bindExtraUI("cross", viewCross, pitch);
 
@@ -7231,7 +7281,6 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         const xSigned = (side==="right" ? +off : side==="left" ? -off : 0);
         state.cross.ui.queryPoint = { m, staDispPitch, side, off, x: xSigned, dz: cr.dz, zPlan: z };
         // sync cross preview station to this STA so user can see it in simple cross view
-        state.cross.ui.queryTok = staDispPitch;
         state.cross.ui.previewTok = staDispPitch;
         saveState();
 
