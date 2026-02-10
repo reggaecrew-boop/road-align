@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.24";
+    window.APP_VERSION = "18.10.25";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1067,79 +1067,22 @@ function dxfExtractPlanControlPoints(dxfText){
 
 
 
-
 function dxfBuildProfileFromBoxTable(dxfText){
   const textsAll = dxfExtractTextLike(dxfText).filter(t=>t && t.text!=null && Number.isFinite(t.x) && Number.isFinite(t.y));
   const texts = textsAll.map(t=>({x:t.x,y:t.y,text:String(t.text)}));
 
   const tolY = 3; // row tolerance
+  const pitchGuess = Math.max(1, Math.floor(state.staPitch||1));
 
   // group by rows
-  const rowMap = new Map(); // key -> items
+  const rowMap = new Map();
   for (const t of texts){
     const key = Math.round(t.y / tolY) * tolY;
     if (!rowMap.has(key)) rowMap.set(key, []);
     rowMap.get(key).push(t);
   }
 
-  // Collect numeric rows (behavior-based) to detect "距離/離" even if label can't be linked.
-  const pitchGuess = Math.max(1, Math.floor(state.staPitch||1));
-  const numericRows = [];
-  for (const [yKey, items] of rowMap.entries()){
-    const nums = items
-      .map(it=>({x:it.x,y:it.y,raw:String(it.text)}))
-      .map(r=>({x:r.x,y:r.y,raw:r.raw.trim().replace(/[－−–—]/g,"-")}))
-      .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
-      .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
-      .filter(r=>Number.isFinite(r.v))
-      .sort((a,b)=>a.x-b.x);
-    if (nums.length >= 3){
-      // score distance-likeness
-      const vals = nums.map(n=>n.v);
-      const diffs = [];
-      for (let i=0;i<vals.length-1;i++){
-        const d = vals[i+1]-vals[i];
-        if (Number.isFinite(d)) diffs.push(d);
-      }
-      const absDiffs = diffs.map(d=>Math.abs(d)).filter(d=>d>1e-9).sort((a,b)=>a-b);
-      const med = absDiffs.length ? absDiffs[Math.floor(absDiffs.length/2)] : NaN;
-      const closeToPitch = Number.isFinite(med) ? (Math.abs(med - pitchGuess) <= pitchGuess*0.35) : false;
-      const hasNeg = vals.some(v=>v<0);
-      const hasPos = vals.some(v=>v>0);
-      const hasZero = vals.some(v=>Math.abs(v) < 1e-6);
-      // "離" row often has .000 fixed values and pitch increments; favor that.
-      const frac000 = vals.filter(v=>Math.abs(v - Math.round(v)) < 1e-6).length / vals.length;
-      let score = nums.length*10;
-      if (closeToPitch) score += 80;
-      if (hasNeg) score += 30;
-      if (hasNeg && hasPos) score += 20;
-      if (hasZero) score += 15;
-      if (frac000 > 0.7) score += 15;
-      numericRows.push({y0:yKey, cells: nums, score});
-    }
-  }
-
-  // --- 1) Prefer label-linked distance row, but fall back to behavior-based best numeric row ---
-  const rowDist = findRowNearLabel(textsAll, /累\s*(?:加|計)|累計|累加|追加\s*距離|距離|離/i);
-  let staCellsDirect = null;
-
-  const buildStaFromNumericRow = (row)=>{
-    if (!row || !row.cells) return null;
-    return row.cells.map(c=>({x:c.x, y:c.y, m:+c.v, raw:String(c.v)}))
-      .filter(c=>Number.isFinite(c.m))
-      .sort((a,b)=>a.x-b.x);
-  };
-
-  if (rowDist && rowDist.cells && rowDist.cells.length >= 3){
-    staCellsDirect = buildStaFromNumericRow(rowDist);
-  }
-  if (!staCellsDirect && numericRows.length){
-    // pick best scoring numeric row; additionally avoid Z row later by preferring larger magnitudes (distance tends to be hundreds)
-    numericRows.sort((a,b)=>b.score-a.score);
-    staCellsDirect = buildStaFromNumericRow(numericRows[0]);
-  }
-
-  // --- helper: build station cells from STA row (supports "STA-1 -20.000" style) ---
+  // --- helpers ---
   const tryParseStaToken = (s)=>{
     const raw = String(s||"").trim();
     if (!raw) return null;
@@ -1155,10 +1098,12 @@ function dxfBuildProfileFromBoxTable(dxfText){
   const staCellsFromRow = (items)=>{
     const its = items.slice().sort((a,b)=>a.x-b.x);
     const cells = [];
+    // 1) standalone parses
     for (const it of its){
       const p = tryParseStaToken(it.text);
       if (p) cells.push({x:it.x,y:it.y,raw:it.text,m:p.m,isStaLike:p.isStaLike});
     }
+    // 2) "STA-1" + "-20.000" pairing
     for (let i=0;i<its.length-1;i++){
       const left = String(its[i].text||"").trim().replace(/[　\s]+/g,"").replace(/[－−–—]/g,"-");
       const rightRaw = String(its[i+1].text||"").trim().replace(/[　\s]+/g,"").replace(/[－−–—]/g,"-");
@@ -1168,7 +1113,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
       const k = parseNumLoose(mSta[1]);
       const rem = parseNumLoose(rightRaw);
       if (!Number.isFinite(k) || !Number.isFinite(rem)) continue;
-      const mVal = k*100 + rem;
+      const mVal = k*100 + rem; // rem may be negative
       cells.push({x:(its[i].x+its[i+1].x)/2, y:its[i].y, raw:`STA${mSta[1]} ${rightRaw}`, m:mVal, isStaLike:true});
     }
     cells.sort((a,b)=>a.x-b.x);
@@ -1181,10 +1126,9 @@ function dxfBuildProfileFromBoxTable(dxfText){
     return out;
   };
 
-  let bestStaRow = null;
-  let bestScore = -Infinity;
-
-  if (!staCellsDirect){
+  const pickStaRow = ()=>{
+    let bestStaRow = null;
+    let bestScore = -Infinity;
     for (const [yKey, items] of rowMap.entries()){
       const cells = staCellsFromRow(items);
       const staLikeCount = cells.reduce((acc,c)=>acc+(c.isStaLike?1:0),0);
@@ -1195,120 +1139,164 @@ function dxfBuildProfileFromBoxTable(dxfText){
         bestStaRow = {y0:yKey, cells: cells};
       }
     }
-    if (!bestStaRow) throw new Error("箱書きの『測点(STA)』行が見つかりません（例：0+0.000 / STA2+0.000 / STA-1 -20.000 等）");
-  }
-
-  const staCells = staCellsDirect || bestStaRow.cells;
-
-  // --- Z row detection ---
-  const rowZ_byLabel = findRowNearLabel(textsAll, /計画\s*(?:高|標高)|計画(?:高|標高)|表層|路面/i);
-  let rowZ = rowZ_byLabel;
-
-  if (!rowZ || !rowZ.cells || rowZ.cells.length < 3){
-    // Fallback: choose numeric row with most cells, excluding near STA row if present
-    let best = null;
-    let bestN = -1;
-    for (const [yKey, items] of rowMap.entries()){
-      if (bestStaRow && Math.abs(yKey - bestStaRow.y0) <= tolY*2) continue;
-      const nums = items
-        .map(it=>({x:it.x,y:it.y,raw:String(it.text)}))
-        .map(r=>({x:r.x,y:r.y,raw:r.raw.trim().replace(/[－−–—]/g,"-")}))
-        .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
-        .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
-        .filter(r=>Number.isFinite(r.v))
-        .sort((a,b)=>a.x-b.x);
-      if (nums.length > bestN){
-        bestN = nums.length;
-        best = {y0:yKey, cells: nums};
-      }
-    }
-    rowZ = best;
-  }
-
-  if (!rowZ || !rowZ.cells || rowZ.cells.length < 3) throw new Error("箱書きの『計画高（表層）』行が見つかりません");
-
-  // --- Match STA cells to nearest Z cells by X ---
-  const zs = rowZ.cells;
-  const rawPts = staCells.map(c=>{
-    let best = zs[0];
-    let bestDx = Math.abs(best.x - c.x);
-    for (const z of zs){
-      const dx = Math.abs(z.x - c.x);
-      if (dx < bestDx){ bestDx = dx; best = z; }
-    }
-    return { sta: +c.m, z: +best.v };
-  }).filter(p=>Number.isFinite(p.sta) && Number.isFinite(p.z));
-
-  rawPts.sort((a,b)=>a.sta-b.sta);
-
-  const pts = [];
-  for (const p of rawPts){
-    if (!pts.length || Math.abs(pts[pts.length-1].sta - p.sta) > 1e-6){
-      pts.push(p);
-    } else {
-      pts[pts.length-1] = p;
-    }
-  }
-
-  if (pts.length < 2) throw new Error("箱書きからSTA・計画高の点が十分に取れません");
-
-  // --- Resample by staPitch aligned to grid ---
-  const pitch = Math.max(1, Math.floor(state.staPitch||1));
-  const sMin = pts[0].sta;
-  const sMax = pts[pts.length-1].sta;
-
-  const interpZ = (s)=>{
-    if (s <= pts[0].sta) return pts[0].z;
-    if (s >= pts[pts.length-1].sta) return pts[pts.length-1].z;
-    for (let i=0;i<pts.length-1;i++){
-      const a=pts[i], b=pts[i+1];
-      if (s >= a.sta && s <= b.sta){
-        const t = (s - a.sta) / (b.sta - a.sta);
-        return a.z + t*(b.z - a.z);
-      }
-    }
-    return pts[pts.length-1].z;
+    return bestStaRow;
   };
 
-  const samples = [];
-  const roundSta = (v)=> +(+v).toFixed(3);
-  const roundZ   = (v)=> +(+v).toFixed(3);
-
-  const g0 = Math.floor(sMin / pitch) * pitch;
-  const g1 = Math.ceil(sMax / pitch) * pitch;
-
-  samples.push({sta: roundSta(sMin), z: roundZ(interpZ(sMin))});
-  for (let s=g0; s<=g1+1e-9; s+=pitch){
-    if (s <= sMin + 1e-9) continue;
-    if (s >= sMax - 1e-9) continue;
-    samples.push({sta: roundSta(s), z: roundZ(interpZ(s))});
-  }
-  if (Math.abs(samples[samples.length-1].sta - sMax) > 1e-6){
-    samples.push({sta: roundSta(sMax), z: roundZ(interpZ(sMax))});
-  }
-  samples.sort((a,b)=>a.sta-b.sta);
-
-  const grades = [];
-  let gid = 1;
-  const roundG  = (v)=> +(+v).toFixed(6);
-
-  for (let i=0;i<samples.length-1;i++){
-    const a=samples[i], b=samples[i+1];
-    const ds = b.sta - a.sta;
-    if (!Number.isFinite(ds) || ds<=0) continue;
-    const g = 100*(b.z - a.z)/ds;
-    const gR = roundG(g);
-    const nextSta = roundSta(b.sta);
-
-    const last = grades[grades.length-1];
-    if (last && Math.abs(last.gradePct - gR) < 1e-6){
-      last.nextSta = nextSta;
-    } else {
-      grades.push({ id: gid++, nextSta, gradePct: gR });
+  const pickZRow = (bestStaRow)=>{
+    const rowZ_byLabel = findRowNearLabel(textsAll, /計画\s*(?:高|標高)|計画(?:高|標高)|表層|路面/i);
+    let rowZ = rowZ_byLabel;
+    if (!rowZ || !rowZ.cells || rowZ.cells.length < 3){
+      let best = null;
+      let bestN = -1;
+      for (const [yKey, items] of rowMap.entries()){
+        if (bestStaRow && Math.abs(yKey - bestStaRow.y0) <= tolY*2) continue;
+        const nums = items
+          .map(it=>({x:it.x,y:it.y,raw:String(it.text).trim().replace(/[－−–—]/g,"-")}))
+          .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
+          .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
+          .filter(r=>Number.isFinite(r.v))
+          .sort((a,b)=>a.x-b.x);
+        if (nums.length > bestN){
+          bestN = nums.length;
+          best = {y0:yKey, cells: nums};
+        }
+      }
+      rowZ = best;
     }
-  }
+    return rowZ;
+  };
 
-  return { startSta: roundSta(samples[0].sta), startZ: roundZ(samples[0].z), grades };
+  const matchPtsByX = (staCells, zCells)=>{
+    const zs = zCells;
+    const rawPts = staCells.map(c=>{
+      let best = zs[0];
+      let bestDx = Math.abs(best.x - c.x);
+      for (const z of zs){
+        const dx = Math.abs(z.x - c.x);
+        if (dx < bestDx){ bestDx = dx; best = z; }
+      }
+      return { sta: +c.m, z: +best.v };
+    }).filter(p=>Number.isFinite(p.sta) && Number.isFinite(p.z));
+    rawPts.sort((a,b)=>a.sta-b.sta);
+    const pts = [];
+    for (const p of rawPts){
+      if (!pts.length || Math.abs(pts[pts.length-1].sta - p.sta) > 1e-6) pts.push(p);
+      else pts[pts.length-1] = p;
+    }
+    return pts;
+  };
+
+  const buildGradesByPitch = (pts)=>{
+    if (!pts || pts.length<2) throw new Error("箱書きからSTA・計画高の点が十分に取れません");
+    const pitch = pitchGuess;
+    const sMin = pts[0].sta;
+    const sMax = pts[pts.length-1].sta;
+
+    const interpZ = (s)=>{
+      if (s <= pts[0].sta) return pts[0].z;
+      if (s >= pts[pts.length-1].sta) return pts[pts.length-1].z;
+      for (let i=0;i<pts.length-1;i++){
+        const a=pts[i], b=pts[i+1];
+        if (s >= a.sta && s <= b.sta){
+          const t = (s - a.sta) / (b.sta - a.sta);
+          return a.z + t*(b.z - a.z);
+        }
+      }
+      return pts[pts.length-1].z;
+    };
+
+    const roundSta = (v)=> +(+v).toFixed(3);
+    const roundZ   = (v)=> +(+v).toFixed(3);
+    const roundG   = (v)=> +(+v).toFixed(6);
+
+    const samples = [];
+    const g0 = Math.floor(sMin / pitch) * pitch;
+    const g1 = Math.ceil(sMax / pitch) * pitch;
+
+    samples.push({sta: roundSta(sMin), z: roundZ(interpZ(sMin))});
+    for (let s=g0; s<=g1+1e-9; s+=pitch){
+      if (s <= sMin + 1e-9) continue;
+      if (s >= sMax - 1e-9) continue;
+      samples.push({sta: roundSta(s), z: roundZ(interpZ(s))});
+    }
+    if (Math.abs(samples[samples.length-1].sta - sMax) > 1e-6){
+      samples.push({sta: roundSta(sMax), z: roundZ(interpZ(sMax))});
+    }
+    samples.sort((a,b)=>a.sta-b.sta);
+
+    const grades = [];
+    let gid = 1;
+    for (let i=0;i<samples.length-1;i++){
+      const a=samples[i], b=samples[i+1];
+      const ds=b.sta-a.sta;
+      if (!Number.isFinite(ds) || ds<=0) continue;
+      const gR = roundG(100*(b.z-a.z)/ds);
+      const nextSta = roundSta(b.sta);
+      const last = grades[grades.length-1];
+      if (last && Math.abs(last.gradePct - gR) < 1e-6) last.nextSta = nextSta;
+      else grades.push({id: gid++, nextSta, gradePct: gR});
+    }
+    return { startSta: roundSta(samples[0].sta), startZ: roundZ(samples[0].z), grades };
+  };
+
+  // --- STEP A: STA-based method (v18.10.25 behavior) ---
+  const bestStaRow = pickStaRow();
+  const rowZ = pickZRow(bestStaRow);
+  if (!rowZ || !rowZ.cells || rowZ.cells.length < 3) throw new Error("箱書きの『計画高（表層）』行が見つかりません");
+  let profileA = null;
+  try{
+    if (bestStaRow && bestStaRow.cells && bestStaRow.cells.length>=3){
+      const ptsA = matchPtsByX(bestStaRow.cells, rowZ.cells);
+      // sanity: need some span
+      if (ptsA.length>=2 && Math.abs(ptsA[ptsA.length-1].sta - ptsA[0].sta) >= pitchGuess*2){
+        profileA = buildGradesByPitch(ptsA);
+      }
+    }
+  }catch(e){ profileA = null; }
+
+  if (profileA) return profileA;
+
+  // --- STEP B: Distance-row fallback (behavior-based numeric row) ---
+  // Find numeric row that looks like distance (many numbers, pitch-like diffs).
+  const numericRows = [];
+  for (const [yKey, items] of rowMap.entries()){
+    const nums = items
+      .map(it=>({x:it.x,y:it.y,raw:String(it.text).trim().replace(/[－−–—]/g,"-")}))
+      .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
+      .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
+      .filter(r=>Number.isFinite(r.v))
+      .sort((a,b)=>a.x-b.x);
+    if (nums.length < 5) continue;
+    const vals = nums.map(n=>n.v);
+    const diffs = [];
+    for (let i=0;i<vals.length-1;i++){
+      diffs.push(vals[i+1]-vals[i]);
+    }
+    const absDiffs = diffs.map(d=>Math.abs(d)).filter(d=>d>1e-9).sort((a,b)=>a-b);
+    const med = absDiffs.length ? absDiffs[Math.floor(absDiffs.length/2)] : NaN;
+    const closeToPitch = Number.isFinite(med) ? (Math.abs(med - pitchGuess) <= pitchGuess*0.35) : false;
+    const hasNeg = vals.some(v=>v<0);
+    const hasPos = vals.some(v=>v>0);
+    const hasZero = vals.some(v=>Math.abs(v) < 1e-6);
+    // avoid Z-like rows: typical elevation magnitudes are small (<200), while distance often larger.
+    const mag = Math.max(...vals.map(v=>Math.abs(v)));
+    let score = nums.length*10;
+    if (closeToPitch) score += 80;
+    if (hasNeg) score += 30;
+    if (hasNeg && hasPos) score += 20;
+    if (hasZero) score += 15;
+    if (mag >= 200) score += 30;
+    numericRows.push({y0:yKey, cells: nums, score});
+  }
+  numericRows.sort((a,b)=>b.score-a.score);
+  if (!numericRows.length) throw new Error("測点行（STA/距離）を特定できません（特異点は手入力が必要な場合があります）");
+
+  const distRow = numericRows[0];
+  const staCellsDirect = distRow.cells.map(c=>({x:c.x,y:c.y,m:+c.v,raw:String(c.v)}));
+
+  const ptsB = matchPtsByX(staCellsDirect, rowZ.cells);
+  if (ptsB.length < 2) throw new Error("距離行から測点が作れません（特異点は手入力が必要な場合があります）");
+  return buildGradesByPitch(ptsB);
 }
 
 function dxfFindStaListNearCL(dxfText){
