@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.28";
+    window.APP_VERSION = "18.10.29";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1067,6 +1067,7 @@ function dxfExtractPlanControlPoints(dxfText){
 
 
 
+
 function dxfBuildProfileFromBoxTable(dxfText){
   const textsAll = dxfExtractTextLike(dxfText).filter(t=>t && t.text!=null && Number.isFinite(t.x) && Number.isFinite(t.y));
   const texts = textsAll.map(t=>({x:t.x,y:t.y,text:String(t.text)}));
@@ -1083,6 +1084,19 @@ function dxfBuildProfileFromBoxTable(dxfText){
   }
 
   // --- helpers ---
+  const summarizeRow = (cells)=>{
+    const vals = cells.map(c=>c.m ?? c.v).filter(v=>Number.isFinite(v));
+    if (!vals.length) return null;
+    const min = Math.min(...vals), max = Math.max(...vals);
+    const hasNeg = vals.some(v=>v<0), hasZero = vals.some(v=>Math.abs(v) < 1e-6);
+    const diffs = [];
+    const svals = vals.slice().sort((a,b)=>a-b);
+    for (let i=0;i<svals.length-1;i++) diffs.push(Math.abs(svals[i+1]-svals[i]));
+    diffs.sort((a,b)=>a-b);
+    const med = diffs.length ? diffs[Math.floor(diffs.length/2)] : NaN;
+    return {count: vals.length, min, max, hasNeg, hasZero, medDiff: med};
+  };
+
   const tryParseStaToken = (s)=>{
     const raw = String(s||"").trim();
     if (!raw) return null;
@@ -1113,7 +1127,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
       const k = parseNumLoose(mSta[1]);
       const rem = parseNumLoose(rightRaw);
       if (!Number.isFinite(k) || !Number.isFinite(rem)) continue;
-      const mVal = k*100 + rem; // rem may be negative
+      const mVal = k*100 + rem;
       cells.push({x:(its[i].x+its[i+1].x)/2, y:its[i].y, raw:`STA${mSta[1]} ${rightRaw}`, m:mVal, isStaLike:true});
     }
     cells.sort((a,b)=>a.x-b.x);
@@ -1126,9 +1140,8 @@ function dxfBuildProfileFromBoxTable(dxfText){
     return out;
   };
 
-  const pickStaRow = ()=>{
-    let bestStaRow = null;
-    let bestScore = -Infinity;
+  const pickStaRowCandidates = ()=>{
+    const rows = [];
     for (const [yKey, items] of rowMap.entries()){
       const cells = staCellsFromRow(items);
       const staLikeCount = cells.reduce((acc,c)=>acc+(c.isStaLike?1:0),0);
@@ -1136,28 +1149,57 @@ function dxfBuildProfileFromBoxTable(dxfText){
       const mVals = cells.map(c=>c.m).filter(v=>Number.isFinite(v));
       const span = mVals.length ? (Math.max(...mVals)-Math.min(...mVals)) : 0;
       const hasNeg = mVals.some(v=>v<0);
-      // prefer rows that include negative stations and wider station span (avoid picking only STA4+ side)
       const hasZero = mVals.some(v=>Math.abs(v) < Math.max(1e-6, pitchGuess*0.25));
       const minAbs = mVals.length ? Math.min(...mVals.map(v=>Math.abs(v))) : 1e9;
-      // Bonus: row that includes 0 (or near 0) is very likely the correct station baseline.
-      // Penalty: avoid rows that start far away (e.g., only 1200+ shown).
       const score = cells.length*10 + staLikeCount*30 + (hasNeg?200:0) + (hasZero?600:0) + Math.min(200, span/Math.max(1,pitchGuess))*5 - Math.min(300, minAbs/Math.max(1,pitchGuess))*10;
-      if (score > bestScore){
-        bestScore = score;
-        bestStaRow = {y0:yKey, cells: cells};
-      }
+      rows.push({type:"STA", y0:yKey, cells, score, sum:summarizeRow(cells)});
     }
-    return bestStaRow;
+    rows.sort((a,b)=>b.score-a.score);
+    return rows;
   };
 
-  const pickZRow = (bestStaRow)=>{
+  const pickNumericRowCandidates = ()=>{
+    const rows = [];
+    for (const [yKey, items] of rowMap.entries()){
+      const nums = items
+        .map(it=>({x:it.x,y:it.y,raw:String(it.text).trim().replace(/[－−–—]/g,"-")}))
+        .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
+        .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
+        .filter(r=>Number.isFinite(r.v))
+        .sort((a,b)=>a.x-b.x);
+      if (nums.length < 5) continue;
+      const vals = nums.map(n=>n.v);
+      const diffs = [];
+      for (let i=0;i<vals.length-1;i++) diffs.push(vals[i+1]-vals[i]);
+      const absDiffs = diffs.map(d=>Math.abs(d)).filter(d=>d>1e-9).sort((a,b)=>a-b);
+      const med = absDiffs.length ? absDiffs[Math.floor(absDiffs.length/2)] : NaN;
+      const closeToPitch = Number.isFinite(med) ? (Math.abs(med - pitchGuess) <= pitchGuess*0.35) : false;
+      const hasNeg = vals.some(v=>v<0);
+      const hasPos = vals.some(v=>v>0);
+      const hasZero = vals.some(v=>Math.abs(v) < 1e-6);
+      const minAbs = Math.min(...vals.map(v=>Math.abs(v)));
+      const mag = Math.max(...vals.map(v=>Math.abs(v)));
+      let score = nums.length*10;
+      if (closeToPitch) score += 80;
+      if (hasNeg) score += 120;
+      if (hasNeg && hasPos) score += 20;
+      if (hasZero) score += 200;
+      if (mag >= 200) score += 30;
+      score -= Math.min(300, minAbs/Math.max(1,pitchGuess))*10;
+      rows.push({type:"NUM", y0:yKey, cells: nums, score, sum:summarizeRow(nums)});
+    }
+    rows.sort((a,b)=>b.score-a.score);
+    return rows;
+  };
+
+  const pickZRow = (excludeY)=>{
     const rowZ_byLabel = findRowNearLabel(textsAll, /計画\s*(?:高|標高)|計画(?:高|標高)|表層|路面/i);
     let rowZ = rowZ_byLabel;
     if (!rowZ || !rowZ.cells || rowZ.cells.length < 3){
       let best = null;
       let bestN = -1;
       for (const [yKey, items] of rowMap.entries()){
-        if (bestStaRow && Math.abs(yKey - bestStaRow.y0) <= tolY*2) continue;
+        if (excludeY!=null && Math.abs(yKey - excludeY) <= tolY*2) continue;
         const nums = items
           .map(it=>({x:it.x,y:it.y,raw:String(it.text).trim().replace(/[－−–—]/g,"-")}))
           .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
@@ -1177,13 +1219,14 @@ function dxfBuildProfileFromBoxTable(dxfText){
   const matchPtsByX = (staCells, zCells)=>{
     const zs = zCells;
     const rawPts = staCells.map(c=>{
+      const sta = (c.m!=null)? +c.m : +c.v;
       let best = zs[0];
       let bestDx = Math.abs(best.x - c.x);
       for (const z of zs){
         const dx = Math.abs(z.x - c.x);
         if (dx < bestDx){ bestDx = dx; best = z; }
       }
-      return { sta: +c.m, z: +best.v };
+      return { sta, z: +best.v };
     }).filter(p=>Number.isFinite(p.sta) && Number.isFinite(p.z));
     rawPts.sort((a,b)=>a.sta-b.sta);
     const pts = [];
@@ -1247,64 +1290,46 @@ function dxfBuildProfileFromBoxTable(dxfText){
     return { startSta: roundSta(samples[0].sta), startZ: roundZ(samples[0].z), grades };
   };
 
-  // --- STEP A: STA-based method (v18.10.28 behavior) ---
-  const bestStaRow = pickStaRow();
-  const rowZ = pickZRow(bestStaRow);
-  if (!rowZ || !rowZ.cells || rowZ.cells.length < 3) throw new Error("箱書きの『計画高（表層）』行が見つかりません");
-  let profileA = null;
-  try{
-    if (bestStaRow && bestStaRow.cells && bestStaRow.cells.length>=3){
-      const ptsA = matchPtsByX(bestStaRow.cells, rowZ.cells);
-      // sanity: need some span
-      if (ptsA.length>=2 && Math.abs(ptsA[ptsA.length-1].sta - ptsA[0].sta) >= pitchGuess*2){
-        profileA = buildGradesByPitch(ptsA);
+  // Z row
+  const staCand = pickStaRowCandidates();
+  const zRow = pickZRow(staCand.length?staCand[0].y0:null);
+  if (!zRow || !zRow.cells || zRow.cells.length < 3) throw new Error("箱書きの『計画高（表層）』行が見つかりません");
+
+  // Auto pick STA candidate first, else numeric
+  const numCand = pickNumericRowCandidates();
+  let picked = (staCand.length? staCand[0] : (numCand.length? numCand[0] : null));
+  if (!picked) throw new Error("測点行（STA/距離）を特定できません");
+
+  const buildFromPicked = (cand)=>{
+    const pts = matchPtsByX(cand.type==="STA" ? cand.cells : cand.cells, zRow.cells);
+    if (pts.length < 2) throw new Error("測点・計画高の突合せに失敗しました");
+    return buildGradesByPitch(pts);
+  };
+
+  let profile = buildFromPicked(picked);
+
+  // --- Interactive rescue: if there exists a candidate with negative min while picked starts positive ---
+  const pickedStart = profile.startSta;
+  const all = [...staCand.slice(0,5), ...numCand.slice(0,5)];
+  const negCands = all.filter(c=>c.sum && c.sum.min < 0);
+  if (pickedStart >= 0 && negCands.length){
+    const lines = all.slice(0,8).map((c,i)=>{
+      const s=c.sum;
+      const tag = c.type==="STA" ? "STA行" : "数値行";
+      return `${i}: ${tag} min=${s.min.toFixed(3)} max=${s.max.toFixed(3)} n=${s.count} neg=${s.hasNeg?"Y":"N"} zero=${s.hasZero?"Y":"N"} medΔ=${Number.isFinite(s.medDiff)?s.medDiff.toFixed(3):"?"}`;
+    }).join("\n");
+    const ans = prompt(`縦断DXF: 測点行の候補を選択できます（マイナス測点がある図面向け）\n番号を入力してください（キャンセルで自動）\n\n${lines}`, "");
+    const k = parseInt(ans,10);
+    if (Number.isFinite(k) && k>=0 && k<Math.min(8,all.length)){
+      try{
+        profile = buildFromPicked(all[k]);
+      }catch(e){
+        // keep auto if selected fails
       }
     }
-  }catch(e){ profileA = null; }
-
-  if (profileA) return profileA;
-
-  // --- STEP B: Distance-row fallback (behavior-based numeric row) ---
-  // Find numeric row that looks like distance (many numbers, pitch-like diffs).
-  const numericRows = [];
-  for (const [yKey, items] of rowMap.entries()){
-    const nums = items
-      .map(it=>({x:it.x,y:it.y,raw:String(it.text).trim().replace(/[－−–—]/g,"-")}))
-      .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
-      .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
-      .filter(r=>Number.isFinite(r.v))
-      .sort((a,b)=>a.x-b.x);
-    if (nums.length < 5) continue;
-    const vals = nums.map(n=>n.v);
-    const diffs = [];
-    for (let i=0;i<vals.length-1;i++){
-      diffs.push(vals[i+1]-vals[i]);
-    }
-    const absDiffs = diffs.map(d=>Math.abs(d)).filter(d=>d>1e-9).sort((a,b)=>a-b);
-    const med = absDiffs.length ? absDiffs[Math.floor(absDiffs.length/2)] : NaN;
-    const closeToPitch = Number.isFinite(med) ? (Math.abs(med - pitchGuess) <= pitchGuess*0.35) : false;
-    const hasNeg = vals.some(v=>v<0);
-    const hasPos = vals.some(v=>v>0);
-    const hasZero = vals.some(v=>Math.abs(v) < 1e-6);
-    // avoid Z-like rows: typical elevation magnitudes are small (<200), while distance often larger.
-    const mag = Math.max(...vals.map(v=>Math.abs(v)));
-    let score = nums.length*10;
-    if (closeToPitch) score += 80;
-    if (hasNeg) score += 120;
-    if (hasNeg && hasPos) score += 20;
-    if (hasZero) score += 15;
-    if (mag >= 200) score += 30;
-    numericRows.push({y0:yKey, cells: nums, score});
   }
-  numericRows.sort((a,b)=>b.score-a.score);
-  if (!numericRows.length) throw new Error("測点行（STA/距離）を特定できません（特異点は手入力が必要な場合があります）");
 
-  const distRow = numericRows[0];
-  const staCellsDirect = distRow.cells.map(c=>({x:c.x,y:c.y,m:+c.v,raw:String(c.v)}));
-
-  const ptsB = matchPtsByX(staCellsDirect, rowZ.cells);
-  if (ptsB.length < 2) throw new Error("距離行から測点が作れません（特異点は手入力が必要な場合があります）");
-  return buildGradesByPitch(ptsB);
+  return profile;
 }
 
 function dxfFindStaListNearCL(dxfText){
