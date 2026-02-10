@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.30";
+    window.APP_VERSION = "18.10.31";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -7186,9 +7186,11 @@ const cr = computeCrossSide("common", "right");
     const tok = (inpPrev?.value||'').trim();
     if (!tok){ if (infoEl) infoEl.textContent = '作成済み横断面がありません'; return; }
     ensureCrossState();
+    // プレビュー測点＝編集対象測点 として同期（作成済み横断の修正をしやすくする）
     state.cross.ui.previewTok = tok;
+    state.cross.ui.selectedStaKey = tok;
     saveState();
-    drawPreview(tok);
+    render(); // 再描画して横断エレメント入力欄を選択測点の内容に切替
   };
 
   if (btnPrev) btnPrev.onclick = runPrev;
