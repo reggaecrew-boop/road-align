@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.29";
+    window.APP_VERSION = "18.10.30";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1072,7 +1072,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
   const textsAll = dxfExtractTextLike(dxfText).filter(t=>t && t.text!=null && Number.isFinite(t.x) && Number.isFinite(t.y));
   const texts = textsAll.map(t=>({x:t.x,y:t.y,text:String(t.text)}));
 
-  const tolY = 3; // row tolerance
+  const tolY = 6; // row tolerance (looser for split rows)
   const pitchGuess = Math.max(1, Math.floor(state.staPitch||1));
 
   // group by rows
@@ -1167,7 +1167,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
         .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
         .filter(r=>Number.isFinite(r.v))
         .sort((a,b)=>a.x-b.x);
-      if (nums.length < 5) continue;
+      if (nums.length < 3) continue;
       const vals = nums.map(n=>n.v);
       const diffs = [];
       for (let i=0;i<vals.length-1;i++) diffs.push(vals[i+1]-vals[i]);
@@ -1312,13 +1312,13 @@ function dxfBuildProfileFromBoxTable(dxfText){
   const pickedStart = profile.startSta;
   const all = [...staCand.slice(0,5), ...numCand.slice(0,5)];
   const negCands = all.filter(c=>c.sum && c.sum.min < 0);
-  if (pickedStart >= 0 && negCands.length){
+  if (all.length){
     const lines = all.slice(0,8).map((c,i)=>{
       const s=c.sum;
       const tag = c.type==="STA" ? "STA行" : "数値行";
       return `${i}: ${tag} min=${s.min.toFixed(3)} max=${s.max.toFixed(3)} n=${s.count} neg=${s.hasNeg?"Y":"N"} zero=${s.hasZero?"Y":"N"} medΔ=${Number.isFinite(s.medDiff)?s.medDiff.toFixed(3):"?"}`;
     }).join("\n");
-    const ans = prompt(`縦断DXF: 測点行の候補を選択できます（マイナス測点がある図面向け）\n番号を入力してください（キャンセルで自動）\n\n${lines}`, "");
+    const ans = prompt(`縦断DXF: 測点行の候補を選択できます（自動が外れる場合はここで補正できます）\n番号を入力してください（キャンセルで自動）\n\n${lines}`, "");
     const k = parseInt(ans,10);
     if (Number.isFinite(k) && k>=0 && k<Math.min(8,all.length)){
       try{
