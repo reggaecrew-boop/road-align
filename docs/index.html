@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.26";
+    window.APP_VERSION = "18.10.27";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1133,7 +1133,11 @@ function dxfBuildProfileFromBoxTable(dxfText){
       const cells = staCellsFromRow(items);
       const staLikeCount = cells.reduce((acc,c)=>acc+(c.isStaLike?1:0),0);
       if (cells.length < 3) continue;
-      const score = cells.length*10 + staLikeCount*30;
+      const mVals = cells.map(c=>c.m).filter(v=>Number.isFinite(v));
+      const span = mVals.length ? (Math.max(...mVals)-Math.min(...mVals)) : 0;
+      const hasNeg = mVals.some(v=>v<0);
+      // prefer rows that include negative stations and wider station span (avoid picking only STA4+ side)
+      const score = cells.length*10 + staLikeCount*30 + (hasNeg?200:0) + Math.min(200, span/Math.max(1,pitchGuess))*5;
       if (score > bestScore){
         bestScore = score;
         bestStaRow = {y0:yKey, cells: cells};
@@ -1239,7 +1243,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
     return { startSta: roundSta(samples[0].sta), startZ: roundZ(samples[0].z), grades };
   };
 
-  // --- STEP A: STA-based method (v18.10.26 behavior) ---
+  // --- STEP A: STA-based method (v18.10.27 behavior) ---
   const bestStaRow = pickStaRow();
   const rowZ = pickZRow(bestStaRow);
   if (!rowZ || !rowZ.cells || rowZ.cells.length < 3) throw new Error("箱書きの『計画高（表層）』行が見つかりません");
@@ -1282,7 +1286,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
     const mag = Math.max(...vals.map(v=>Math.abs(v)));
     let score = nums.length*10;
     if (closeToPitch) score += 80;
-    if (hasNeg) score += 30;
+    if (hasNeg) score += 120;
     if (hasNeg && hasPos) score += 20;
     if (hasZero) score += 15;
     if (mag >= 200) score += 30;
