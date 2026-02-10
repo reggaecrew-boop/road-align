@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.23";
+    window.APP_VERSION = "18.10.24";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1067,6 +1067,7 @@ function dxfExtractPlanControlPoints(dxfText){
 
 
 
+
 function dxfBuildProfileFromBoxTable(dxfText){
   const textsAll = dxfExtractTextLike(dxfText).filter(t=>t && t.text!=null && Number.isFinite(t.x) && Number.isFinite(t.y));
   const texts = textsAll.map(t=>({x:t.x,y:t.y,text:String(t.text)}));
@@ -1081,16 +1082,61 @@ function dxfBuildProfileFromBoxTable(dxfText){
     rowMap.get(key).push(t);
   }
 
-  // --- 1) Try to use distance (累加/累計/距離/離) row as station directly (most stable) ---
-  // This covers cases where left side uses BC/EC and STA is not written, but distance values exist.
+  // Collect numeric rows (behavior-based) to detect "距離/離" even if label can't be linked.
+  const pitchGuess = Math.max(1, Math.floor(state.staPitch||1));
+  const numericRows = [];
+  for (const [yKey, items] of rowMap.entries()){
+    const nums = items
+      .map(it=>({x:it.x,y:it.y,raw:String(it.text)}))
+      .map(r=>({x:r.x,y:r.y,raw:r.raw.trim().replace(/[－−–—]/g,"-")}))
+      .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
+      .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
+      .filter(r=>Number.isFinite(r.v))
+      .sort((a,b)=>a.x-b.x);
+    if (nums.length >= 3){
+      // score distance-likeness
+      const vals = nums.map(n=>n.v);
+      const diffs = [];
+      for (let i=0;i<vals.length-1;i++){
+        const d = vals[i+1]-vals[i];
+        if (Number.isFinite(d)) diffs.push(d);
+      }
+      const absDiffs = diffs.map(d=>Math.abs(d)).filter(d=>d>1e-9).sort((a,b)=>a-b);
+      const med = absDiffs.length ? absDiffs[Math.floor(absDiffs.length/2)] : NaN;
+      const closeToPitch = Number.isFinite(med) ? (Math.abs(med - pitchGuess) <= pitchGuess*0.35) : false;
+      const hasNeg = vals.some(v=>v<0);
+      const hasPos = vals.some(v=>v>0);
+      const hasZero = vals.some(v=>Math.abs(v) < 1e-6);
+      // "離" row often has .000 fixed values and pitch increments; favor that.
+      const frac000 = vals.filter(v=>Math.abs(v - Math.round(v)) < 1e-6).length / vals.length;
+      let score = nums.length*10;
+      if (closeToPitch) score += 80;
+      if (hasNeg) score += 30;
+      if (hasNeg && hasPos) score += 20;
+      if (hasZero) score += 15;
+      if (frac000 > 0.7) score += 15;
+      numericRows.push({y0:yKey, cells: nums, score});
+    }
+  }
+
+  // --- 1) Prefer label-linked distance row, but fall back to behavior-based best numeric row ---
   const rowDist = findRowNearLabel(textsAll, /累\s*(?:加|計)|累計|累加|追加\s*距離|距離|離/i);
   let staCellsDirect = null;
-  if (rowDist && rowDist.cells && rowDist.cells.length >= 3){
-    // rowDist.cells: {x,y,v}
-    staCellsDirect = rowDist.cells
-      .map(c=>({x:c.x, y:c.y, m:+c.v, raw:String(c.v)}))
+
+  const buildStaFromNumericRow = (row)=>{
+    if (!row || !row.cells) return null;
+    return row.cells.map(c=>({x:c.x, y:c.y, m:+c.v, raw:String(c.v)}))
       .filter(c=>Number.isFinite(c.m))
       .sort((a,b)=>a.x-b.x);
+  };
+
+  if (rowDist && rowDist.cells && rowDist.cells.length >= 3){
+    staCellsDirect = buildStaFromNumericRow(rowDist);
+  }
+  if (!staCellsDirect && numericRows.length){
+    // pick best scoring numeric row; additionally avoid Z row later by preferring larger magnitudes (distance tends to be hundreds)
+    numericRows.sort((a,b)=>b.score-a.score);
+    staCellsDirect = buildStaFromNumericRow(numericRows[0]);
   }
 
   // --- helper: build station cells from STA row (supports "STA-1 -20.000" style) ---
@@ -1109,12 +1155,10 @@ function dxfBuildProfileFromBoxTable(dxfText){
   const staCellsFromRow = (items)=>{
     const its = items.slice().sort((a,b)=>a.x-b.x);
     const cells = [];
-    // 1) standalone parses
     for (const it of its){
       const p = tryParseStaToken(it.text);
       if (p) cells.push({x:it.x,y:it.y,raw:it.text,m:p.m,isStaLike:p.isStaLike});
     }
-    // 2) "STA-1" + "-20.000" pairing (two separate TEXT entities)
     for (let i=0;i<its.length-1;i++){
       const left = String(its[i].text||"").trim().replace(/[　\s]+/g,"").replace(/[－−–—]/g,"-");
       const rightRaw = String(its[i+1].text||"").trim().replace(/[　\s]+/g,"").replace(/[－−–—]/g,"-");
@@ -1124,7 +1168,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
       const k = parseNumLoose(mSta[1]);
       const rem = parseNumLoose(rightRaw);
       if (!Number.isFinite(k) || !Number.isFinite(rem)) continue;
-      const mVal = k*100 + rem; // rem may be negative
+      const mVal = k*100 + rem;
       cells.push({x:(its[i].x+its[i+1].x)/2, y:its[i].y, raw:`STA${mSta[1]} ${rightRaw}`, m:mVal, isStaLike:true});
     }
     cells.sort((a,b)=>a.x-b.x);
@@ -1154,7 +1198,6 @@ function dxfBuildProfileFromBoxTable(dxfText){
     if (!bestStaRow) throw new Error("箱書きの『測点(STA)』行が見つかりません（例：0+0.000 / STA2+0.000 / STA-1 -20.000 等）");
   }
 
-  // Final station cells
   const staCells = staCellsDirect || bestStaRow.cells;
 
   // --- Z row detection ---
@@ -1162,15 +1205,16 @@ function dxfBuildProfileFromBoxTable(dxfText){
   let rowZ = rowZ_byLabel;
 
   if (!rowZ || !rowZ.cells || rowZ.cells.length < 3){
-    // Fallback: choose the numeric row with the most cells, excluding near STA row (if any)
+    // Fallback: choose numeric row with most cells, excluding near STA row if present
     let best = null;
     let bestN = -1;
     for (const [yKey, items] of rowMap.entries()){
       if (bestStaRow && Math.abs(yKey - bestStaRow.y0) <= tolY*2) continue;
       const nums = items
-        .map(it=>({x:it.x,y:it.y,raw:it.text}))
-        .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(String(r.raw).trim()))
-        .map(r=>({x:r.x,y:r.y,v:parseFloat(String(r.raw).trim())}))
+        .map(it=>({x:it.x,y:it.y,raw:String(it.text)}))
+        .map(r=>({x:r.x,y:r.y,raw:r.raw.trim().replace(/[－−–—]/g,"-")}))
+        .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(r.raw))
+        .map(r=>({x:r.x,y:r.y,v:parseFloat(r.raw)}))
         .filter(r=>Number.isFinite(r.v))
         .sort((a,b)=>a.x-b.x);
       if (nums.length > bestN){
@@ -1197,7 +1241,6 @@ function dxfBuildProfileFromBoxTable(dxfText){
 
   rawPts.sort((a,b)=>a.sta-b.sta);
 
-  // dedupe by sta
   const pts = [];
   for (const p of rawPts){
     if (!pts.length || Math.abs(pts[pts.length-1].sta - p.sta) > 1e-6){
@@ -1209,7 +1252,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
 
   if (pts.length < 2) throw new Error("箱書きからSTA・計画高の点が十分に取れません");
 
-  // --- Resample by PWA staPitch (A: 測点表示ピッチ) aligned to grid ---
+  // --- Resample by staPitch aligned to grid ---
   const pitch = Math.max(1, Math.floor(state.staPitch||1));
   const sMin = pts[0].sta;
   const sMax = pts[pts.length-1].sta;
@@ -1245,7 +1288,6 @@ function dxfBuildProfileFromBoxTable(dxfText){
   }
   samples.sort((a,b)=>a.sta-b.sta);
 
-  // build grades (merge same grade)
   const grades = [];
   let gid = 1;
   const roundG  = (v)=> +(+v).toFixed(6);
