@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.25";
+    window.APP_VERSION = "18.10.26";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1239,7 +1239,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
     return { startSta: roundSta(samples[0].sta), startZ: roundZ(samples[0].z), grades };
   };
 
-  // --- STEP A: STA-based method (v18.10.25 behavior) ---
+  // --- STEP A: STA-based method (v18.10.26 behavior) ---
   const bestStaRow = pickStaRow();
   const rowZ = pickZRow(bestStaRow);
   if (!rowZ || !rowZ.cells || rowZ.cells.length < 3) throw new Error("箱書きの『計画高（表層）』行が見つかりません");
@@ -2064,6 +2064,9 @@ const parseNumLoose = (v) => {
 // Parse station tokens in 100m notation.
 // Examples: "2+12.651" => 212.651m, "-0+20.000" => -20.000m, "-1+20.000" => -120.000m
 // Also accepts plain meters ("212.651") and "-1-20" style (= -120.000m).
+// Parse station tokens in 100m notation.
+// Examples: "2+12.651" => 212.651m, "-0+20.000" => -20.000m, "-1+20.000" => -120.000m
+// Also accepts plain meters ("212.651") and "-1-20" style (= -120.000m).
 const parseSta100 = (token) => {
   let s = String(token ?? "").trim();
   if (!s) throw new Error("STAが空です");
@@ -2084,10 +2087,10 @@ const parseSta100 = (token) => {
   }
 
   // allow "-1-20" (meaning -100 - 20)
-  const m = s.match(/^(-?\d+(?:\.\d+)?)-(?:(\d+(?:\.\d+)?))$/);
-  if (m) {
-    const k = parseNumLoose(m[1]);
-    const rem = parseNumLoose(m[2]);
+  const m2 = s.match(/^(-?\d+(?:\.\d+)?)-(?:(\d+(?:\.\d+)?))$/);
+  if (m2) {
+    const k = parseNumLoose(m2[1]);
+    const rem = parseNumLoose(m2[2]);
     if (!Number.isFinite(k) || !Number.isFinite(rem)) throw new Error("STA形式が不正です");
     return k*100 - rem;
   }
