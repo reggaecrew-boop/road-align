@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.22";
+    window.APP_VERSION = "18.10.23";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -1066,6 +1066,7 @@ function dxfExtractPlanControlPoints(dxfText){
 
 
 
+
 function dxfBuildProfileFromBoxTable(dxfText){
   const textsAll = dxfExtractTextLike(dxfText).filter(t=>t && t.text!=null && Number.isFinite(t.x) && Number.isFinite(t.y));
   const texts = textsAll.map(t=>({x:t.x,y:t.y,text:String(t.text)}));
@@ -1080,7 +1081,19 @@ function dxfBuildProfileFromBoxTable(dxfText){
     rowMap.get(key).push(t);
   }
 
-  // --- STA row detection (supports "STA-1 -20.000" style) ---
+  // --- 1) Try to use distance (累加/累計/距離/離) row as station directly (most stable) ---
+  // This covers cases where left side uses BC/EC and STA is not written, but distance values exist.
+  const rowDist = findRowNearLabel(textsAll, /累\s*(?:加|計)|累計|累加|追加\s*距離|距離|離/i);
+  let staCellsDirect = null;
+  if (rowDist && rowDist.cells && rowDist.cells.length >= 3){
+    // rowDist.cells: {x,y,v}
+    staCellsDirect = rowDist.cells
+      .map(c=>({x:c.x, y:c.y, m:+c.v, raw:String(c.v)}))
+      .filter(c=>Number.isFinite(c.m))
+      .sort((a,b)=>a.x-b.x);
+  }
+
+  // --- helper: build station cells from STA row (supports "STA-1 -20.000" style) ---
   const tryParseStaToken = (s)=>{
     const raw = String(s||"").trim();
     if (!raw) return null;
@@ -1101,21 +1114,19 @@ function dxfBuildProfileFromBoxTable(dxfText){
       const p = tryParseStaToken(it.text);
       if (p) cells.push({x:it.x,y:it.y,raw:it.text,m:p.m,isStaLike:p.isStaLike});
     }
-    // 2) "STA-1" + "-20.000" pairing (often two separate TEXT entities)
+    // 2) "STA-1" + "-20.000" pairing (two separate TEXT entities)
     for (let i=0;i<its.length-1;i++){
       const left = String(its[i].text||"").trim().replace(/[　\s]+/g,"").replace(/[－−–—]/g,"-");
       const rightRaw = String(its[i+1].text||"").trim().replace(/[　\s]+/g,"").replace(/[－−–—]/g,"-");
       const mSta = left.match(/^STA(-?\d+)$/i);
       if (!mSta) continue;
-      // right should be signed number (e.g. -20.000)
       if (!/^[+-]?\d+(?:\.\d+)?$/.test(rightRaw)) continue;
       const k = parseNumLoose(mSta[1]);
       const rem = parseNumLoose(rightRaw);
       if (!Number.isFinite(k) || !Number.isFinite(rem)) continue;
-      const mVal = k*100 + rem; // rem may be negative (e.g. -20)
+      const mVal = k*100 + rem; // rem may be negative
       cells.push({x:(its[i].x+its[i+1].x)/2, y:its[i].y, raw:`STA${mSta[1]} ${rightRaw}`, m:mVal, isStaLike:true});
     }
-    // dedupe by x+value roughly
     cells.sort((a,b)=>a.x-b.x);
     const out = [];
     for (const c of cells){
@@ -1129,30 +1140,33 @@ function dxfBuildProfileFromBoxTable(dxfText){
   let bestStaRow = null;
   let bestScore = -Infinity;
 
-  for (const [yKey, items] of rowMap.entries()){
-    const cells = staCellsFromRow(items);
-    const staLikeCount = cells.reduce((acc,c)=>acc+(c.isStaLike?1:0),0);
-    if (cells.length < 3) continue;
-    // prefer rows with many explicit STA-like tokens (not just plain numbers)
-    const score = cells.length*10 + staLikeCount*30;
-    if (score > bestScore){
-      bestScore = score;
-      bestStaRow = {y0:yKey, cells: cells};
+  if (!staCellsDirect){
+    for (const [yKey, items] of rowMap.entries()){
+      const cells = staCellsFromRow(items);
+      const staLikeCount = cells.reduce((acc,c)=>acc+(c.isStaLike?1:0),0);
+      if (cells.length < 3) continue;
+      const score = cells.length*10 + staLikeCount*30;
+      if (score > bestScore){
+        bestScore = score;
+        bestStaRow = {y0:yKey, cells: cells};
+      }
     }
+    if (!bestStaRow) throw new Error("箱書きの『測点(STA)』行が見つかりません（例：0+0.000 / STA2+0.000 / STA-1 -20.000 等）");
   }
 
-  if (!bestStaRow) throw new Error("箱書きの『測点(STA)』行が見つかりません（例：0+0.000 / STA2+0.000 / STA-1 -20.000 等）");
+  // Final station cells
+  const staCells = staCellsDirect || bestStaRow.cells;
 
   // --- Z row detection ---
   const rowZ_byLabel = findRowNearLabel(textsAll, /計画\s*(?:高|標高)|計画(?:高|標高)|表層|路面/i);
   let rowZ = rowZ_byLabel;
 
   if (!rowZ || !rowZ.cells || rowZ.cells.length < 3){
-    // Fallback: choose the numeric row with the most cells, excluding near STA row
+    // Fallback: choose the numeric row with the most cells, excluding near STA row (if any)
     let best = null;
     let bestN = -1;
     for (const [yKey, items] of rowMap.entries()){
-      if (Math.abs(yKey - bestStaRow.y0) <= tolY*2) continue;
+      if (bestStaRow && Math.abs(yKey - bestStaRow.y0) <= tolY*2) continue;
       const nums = items
         .map(it=>({x:it.x,y:it.y,raw:it.text}))
         .filter(r=>/^[+-]?\d+(?:\.\d+)?$/.test(String(r.raw).trim()))
@@ -1171,7 +1185,7 @@ function dxfBuildProfileFromBoxTable(dxfText){
 
   // --- Match STA cells to nearest Z cells by X ---
   const zs = rowZ.cells;
-  const rawPts = bestStaRow.cells.map(c=>{
+  const rawPts = staCells.map(c=>{
     let best = zs[0];
     let bestDx = Math.abs(best.x - c.x);
     for (const z of zs){
@@ -1217,24 +1231,18 @@ function dxfBuildProfileFromBoxTable(dxfText){
   const roundSta = (v)=> +(+v).toFixed(3);
   const roundZ   = (v)=> +(+v).toFixed(3);
 
-  // grid-aligned stations (multiples of pitch) within range, plus exact endpoints
   const g0 = Math.floor(sMin / pitch) * pitch;
   const g1 = Math.ceil(sMax / pitch) * pitch;
 
-  // include exact start
   samples.push({sta: roundSta(sMin), z: roundZ(interpZ(sMin))});
-
   for (let s=g0; s<=g1+1e-9; s+=pitch){
     if (s <= sMin + 1e-9) continue;
     if (s >= sMax - 1e-9) continue;
     samples.push({sta: roundSta(s), z: roundZ(interpZ(s))});
   }
-
-  // include exact end
   if (Math.abs(samples[samples.length-1].sta - sMax) > 1e-6){
     samples.push({sta: roundSta(sMax), z: roundZ(interpZ(sMax))});
   }
-
   samples.sort((a,b)=>a.sta-b.sta);
 
   // build grades (merge same grade)
