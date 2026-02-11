@@ -2650,7 +2650,7 @@ const getActiveElemStore = (side)=>{
 
 const syncCrossCommonSegsFromElems = ()=>{
   ensureElemCommonInitialized();
-  const xr = getXrangeDefault();
+  const xr = getXrangeForStaKey(null);
   state.cross.right.segs = elemsToSegs(state.cross.elemCommon.right.items, 'right', xr.R);
   state.cross.left.segs  = elemsToSegs(state.cross.elemCommon.left.items,  'left',  xr.L);
   state.cross.right.nextSegId = Math.max(0, ...state.cross.right.segs.map(r=>r.id||0)) + 1;
