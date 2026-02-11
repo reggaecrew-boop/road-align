@@ -12,7 +12,7 @@
 <script>
     // Version is single-source-of-truth.
     // Keep this block extremely defensive for iOS Safari.
-    window.APP_VERSION = "18.10.33";
+    window.APP_VERSION = "18.10.31";
     // Defer SW registration to after DOM is ready (and never hard-fail).
     window.__TRY_REGISTER_SW__ = function(){
       try {
@@ -190,7 +190,7 @@
   } catch (e) {}
 })();
 
-// --- diagnostics (v18.8.3) ---
+// --- diagnostics (v18.10.34) ---
 
 // ---- global escapeHtml helper ----
 function escapeHtml(s){
@@ -2175,7 +2175,7 @@ const xmlEscape = (s) =>
     .replace(/'/g,"&apos;");
 
 
-// Cross segment helpers (v18.8.3)
+// Cross segment helpers (v18.10.34)
 // mode: 'pct' uses slopePct directly, 'ratio' uses 1:X (vertical 1 : horizontal X)
 const crossRowSlopePct = (r)=>{
   const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
@@ -2817,7 +2817,7 @@ if (!Number.isFinite(obj.nextSegId)) {
   const sel = state.cross.ui.selectedStaKey;
   if (sel && !state.cross.overrides[sel]) state.cross.ui.selectedStaKey = "";
 
-  // --- Phase1: xrange/base + elements (v18.9.0) ---
+  // --- Phase1: xrange/base + elements (v18.10.34) ---
   if (!state.cross.xrangeDefault || typeof state.cross.xrangeDefault !== 'object' || Array.isArray(state.cross.xrangeDefault)) {
     // default clip range equals current lastEnd
     const cr0 = computeCrossRowsFromSegs(state.cross.right?.segs||[]);
