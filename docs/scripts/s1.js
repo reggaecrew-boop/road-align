@@ -13,9 +13,18 @@ if (typeof window.escapeHtml !== 'function') {
 
 // ---- Safe storage wrapper (Safari private mode can throw on localStorage access) ----
 const LS = {
-  get(k){ try{ return LS.get(k); } catch(e){ return null; } },
-  set(k,v){ try{ LS.set(k,v); return true; } catch(e){ return false; } },
-  remove(k){ try{ LS.remove(k); } catch(e){} },
+  get(k){
+    try { return localStorage.getItem(k); }
+    catch (e) { return null; }
+  },
+  set(k,v){
+    try { localStorage.setItem(k, String(v)); return true; }
+    catch (e) { return false; }
+  },
+  remove(k){
+    try { localStorage.removeItem(k); }
+    catch (e) {}
+  },
 };
 
 
