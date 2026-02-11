@@ -34,7 +34,7 @@ if (typeof window.escapeHtml !== 'function') {
   } catch (e) {}
 })();
 
-// --- diagnostics (v18.8.3) ---
+// --- diagnostics (v18.10.35) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
@@ -1770,7 +1770,7 @@ const xmlEscape = (s) =>
     .replace(/'/g,"&apos;");
 
 
-// Cross segment helpers (v18.8.3)
+// Cross segment helpers (v18.10.35)
 // mode: 'pct' uses slopePct directly, 'ratio' uses 1:X (vertical 1 : horizontal X)
 const crossRowSlopePct = (r)=>{
   const mode = (r && typeof r.mode === 'string') ? r.mode : 'pct';
@@ -2416,7 +2416,7 @@ if (!Number.isFinite(obj.nextSegId)) {
   const sel = state.cross.ui.selectedStaKey;
   if (sel && !state.cross.overrides[sel]) state.cross.ui.selectedStaKey = "";
 
-  // --- Phase1: xrange/base + elements (v18.9.0) ---
+  // --- Phase1: xrange/base + elements (v18.10.35) ---
   if (!state.cross.xrangeDefault || typeof state.cross.xrangeDefault !== 'object' || Array.isArray(state.cross.xrangeDefault)) {
     // default clip range equals current lastEnd
     const cr0 = computeCrossRowsFromSegs(state.cross.right?.segs||[]);
