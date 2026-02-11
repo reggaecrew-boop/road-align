@@ -1,9 +1,11 @@
-// sw.js (v18.10.7_0)
-const CACHE_NAME = "road-align-pwa-v18_10_37";
+// sw.js (v18.10.38_1)
+const CACHE_NAME = "road-align-pwa-v18_10_38";
 const CORE_ASSETS = [
   "./",
   "./index.html",
-  "./manifest.json"
+  "./manifest.json",
+  "./scripts/s0.js",
+  "./scripts/s1.js"
 ];
 
 self.addEventListener("install", (event) => {
