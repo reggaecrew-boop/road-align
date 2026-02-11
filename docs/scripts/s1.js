@@ -216,6 +216,10 @@ let state = {
 
 };
 
+// expose for inline helpers in index.html (e.g., datalist population)
+// keep as a reference to the current state object
+try { window.state = state; } catch (e) {}
+
 function saveState() {
   try { LS.set(LS_KEY, JSON.stringify(state)); } catch(e) {}
 }
@@ -1526,6 +1530,7 @@ function loadState() {
     if (obj && typeof obj === "object") {
       state = Object.assign(state, obj);
       state = normalizeState(state);
+      try { window.state = state; } catch (e) {}
 
       // 旧キーから読み込んだ場合は新キーにも書き戻す
       if (!tNew && tOld) {
@@ -7286,6 +7291,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
         const obj = JSON.parse(txt);
         if (!obj || typeof obj !== "object") throw new Error("JSONが不正");
         state = normalizeState(Object.assign(state, obj));
+        try { window.state = state; } catch (e) {}
         saveState();
         render();
         alert("読み込み完了");
