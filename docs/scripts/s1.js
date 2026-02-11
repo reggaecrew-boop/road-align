@@ -34,7 +34,7 @@ if (typeof window.escapeHtml !== 'function') {
   } catch (e) {}
 })();
 
-// --- diagnostics (v18.10.35) ---
+// --- diagnostics (v18.10.36) ---
 (function(){
   const escapeHtml = (s)=>String(s??'').replace(/[&<>"']/g, (c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const show = (title, err)=>{
