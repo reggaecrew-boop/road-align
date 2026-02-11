@@ -11,6 +11,14 @@ if (typeof window.escapeHtml !== 'function') {
   };
 }
 
+// ---- Safe storage wrapper (Safari private mode can throw on localStorage access) ----
+const LS = {
+  get(k){ try{ return LS.get(k); } catch(e){ return null; } },
+  set(k,v){ try{ LS.set(k,v); return true; } catch(e){ return false; } },
+  remove(k){ try{ LS.remove(k); } catch(e){} },
+};
+
+
 
 
 // --- early boot: version badge + SW (defensive) ---
@@ -45,7 +53,7 @@ if (typeof window.escapeHtml !== 'function') {
         el.innerHTML = `<span class='warn'>⚠️ ${title}: ${escapeHtml(msg)}</span> <button id='btnResetLS2' class='btn btn-ghost' style='margin-left:10px; width:auto;'>保存データ初期化</button>`;
         setTimeout(()=>{
           const b=document.getElementById('btnResetLS2');
-          if (b) b.onclick=()=>{ try{ localStorage.removeItem(LS_KEY_NEW); localStorage.removeItem(LS_KEY_OLD); }catch(_){ } location.reload(); };
+          if (b) b.onclick=()=>{ try{ LS.remove(LS_KEY_NEW); LS.remove(LS_KEY_OLD); }catch(_){ } location.reload(); };
         },0);
       } else {
         alert(title+": "+msg);
@@ -67,7 +75,7 @@ const LS_KEY = LS_KEY_NEW;
 const UI_KEY = "road_align_pwa_ui_v1";
 let uiState = { headerCollapsed: false, coordSearch: "" };
 try {
-  const raw = localStorage.getItem(UI_KEY);
+  const raw = LS.get(UI_KEY);
   if (raw) uiState = Object.assign(uiState, JSON.parse(raw));
 } catch (e) {}
 function applyHeaderCollapsed(){
@@ -86,7 +94,7 @@ function applyHeaderCollapsed(){
   }
 }
 function saveUI(){
-  try { localStorage.setItem(UI_KEY, JSON.stringify(uiState)); } catch(e) {}
+  try { LS.set(UI_KEY, JSON.stringify(uiState)); } catch(e) {}
 }
 
 let state = {
@@ -200,7 +208,7 @@ let state = {
 };
 
 function saveState() {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch(e) {}
+  try { LS.set(LS_KEY, JSON.stringify(state)); } catch(e) {}
 }
 function normalizeState(s) {
   // --- extraStations ---
@@ -1500,8 +1508,8 @@ function applyPlanImport(result, mode, msgText){
 }
 
 function loadState() {
-  const tNew = localStorage.getItem(LS_KEY_NEW);
-  const tOld = localStorage.getItem(LS_KEY_OLD);
+  const tNew = LS.get(LS_KEY_NEW);
+  const tOld = LS.get(LS_KEY_OLD);
   const t = tNew || tOld;
   if (!t) return;
   try {
@@ -1512,7 +1520,7 @@ function loadState() {
 
       // 旧キーから読み込んだ場合は新キーにも書き戻す
       if (!tNew && tOld) {
-        try { localStorage.setItem(LS_KEY_NEW, JSON.stringify(state)); } catch (e) {}
+        try { LS.set(LS_KEY_NEW, JSON.stringify(state)); } catch (e) {}
       }
     }
   } catch (e) {}
@@ -4271,7 +4279,7 @@ const render = () => {
       <span class="mini" style="margin-left:10px;">（localStorageを消して再起動）</span>`;
       setTimeout(()=>{
         const b = document.getElementById("btnResetLS");
-        if (b) b.onclick = ()=>{ try{ localStorage.removeItem(LS_KEY_NEW); localStorage.removeItem(LS_KEY_OLD); }catch(_){ } location.reload(); };
+        if (b) b.onclick = ()=>{ try{ LS.remove(LS_KEY_NEW); LS.remove(LS_KEY_OLD); }catch(_){ } location.reload(); };
       },0);
     } else {
       bs.innerHTML = `<span class="mini">起動OK（描画中）</span>`;
@@ -7283,7 +7291,7 @@ if (Number.isFinite(res.total) && res.total >= 0 && Number.isFinite(pitchStep)) 
   if (clearLocalBtn) {
     clearLocalBtn.onclick = ()=>{
       if (!confirm("iPad内保存を削除します。よろしい？")) return;
-      try { localStorage.removeItem(LS_KEY); } catch(e) {}
+      try { LS.remove(LS_KEY); } catch(e) {}
       alert("削除しました（次回起動は初期値）");
     };
   }
@@ -7350,7 +7358,7 @@ function _tsCompact(){
 }
 function _getDefaultExportBase(){
   try{
-    const last = localStorage.getItem("lastExportBaseName") || "";
+    const last = LS.get("lastExportBaseName") || "";
     if(last.trim()) return last.trim();
   }catch(e){}
   return (state && state.projectName) ? String(state.projectName) : "";
@@ -7360,7 +7368,6 @@ function buildExportFileName(kind){
   const defBase = _getDefaultExportBase();
   const input = window.prompt("書き出しファイル名（先頭）を入力してね\n例）現場名_工区名", defBase);
   const base = _sanitizeFilePart((input==null ? defBase : input));
-  try{ localStorage.setItem("lastExportBaseName", base); }catch(e){}
+  try{ LS.set("lastExportBaseName", base); }catch(e){}
   return `${base}_${kind}_${_tsCompact()}.json`;
 }
-
