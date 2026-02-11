@@ -4709,7 +4709,7 @@ const render = () => {
         if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
       }
     };
-  })()
+  })();
 /* Plan JSON import bind */
 (function(){
   const fi = document.getElementById("planJsonFile");
@@ -5397,7 +5397,7 @@ document.getElementById("profEnabled").onchange = (e)=>{ state.profile.enabled =
       if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
     }
   };
-})()
+})();
 /* Profile JSON import bind */
 (function(){
   const fi = document.getElementById('profileJsonFile');
@@ -6066,7 +6066,7 @@ const cr = computeCrossSide("common", "right");
         if (msg) msg.textContent = `DXF読み込みエラー：${e && e.message ? e.message : e}`;
       }
     };
-  })()
+  })();
 /* Cross JSON import bind */
 (function(){
   const fi = document.getElementById('crossJsonFile');
