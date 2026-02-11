@@ -2673,7 +2673,7 @@ const syncCrossActiveSegsFromElems = ()=>{
     if (!k) return;
     syncCrossOverrideSegsFromElems(k);
   } else {
-    syncCrossActiveSegsFromElems();
+    syncCrossCommonSegsFromElems();
   }
 };
 
@@ -6288,7 +6288,7 @@ const cr = computeCrossSide("common", "right");
     const aTo = getActiveElemStore(to);
     if (!aFrom || !aTo) return;
     aTo.items = deepCopy(aFrom.items||[]);
-    aTo.nextId = Math.max(0, ...aTo.items.map(it=>Number(it.id)||0)) + 1;
+    aTo.nextId = Math.max(0, ...(aTo.items||[]).map(it=>Number(it.id)||0)) + 1;
   };
   const copyRow = (from,to)=>{
     const fromSel = Number(state.cross.ui.elemSel[from]||0);
