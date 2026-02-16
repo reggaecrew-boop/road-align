@@ -2387,6 +2387,12 @@ const ensureCrossState = ()=>{
     state.cross.ui = { selectedStaKey: "" };
   }
   if (typeof state.cross.ui.selectedStaKey !== "string") state.cross.ui.selectedStaKey = "";
+  if (typeof state.cross.ui.elemMode !== "string") state.cross.ui.elemMode = "common";
+  if (typeof state.cross.ui.overrideSel !== "string") state.cross.ui.overrideSel = "";
+  if (typeof state.cross.ui.editStaTok !== "string") state.cross.ui.editStaTok = "";
+  if (typeof state.cross.ui.standardEditStaTok !== "string") state.cross.ui.standardEditStaTok = "";
+  if (!Array.isArray(state.cross.ui.drawingStaList)) state.cross.ui.drawingStaList = [];
+
 
   if (state.cross.ui.elemMode !== "common" && state.cross.ui.elemMode !== "override") state.cross.ui.elemMode = "common";
   if (typeof state.cross.ui.editStaTok !== "string") state.cross.ui.editStaTok = "";
@@ -2461,6 +2467,7 @@ if (!Number.isFinite(obj.nextSegId)) {
     const es = state.cross.elemCommon[sideKey];
     if (!es || typeof es !== 'object' || Array.isArray(es)) state.cross.elemCommon[sideKey] = { items:[], nextId:1 };
     if (!Array.isArray(state.cross.elemCommon[sideKey].items)) state.cross.elemCommon[sideKey].items = [];
+    if (!Number.isFinite(Number(state.cross.elemCommon[sideKey].anchorId))) state.cross.elemCommon[sideKey].anchorId = 0;
     if (!Number.isFinite(Number(state.cross.elemCommon[sideKey].nextId))) {
       const mx = Math.max(0, ...state.cross.elemCommon[sideKey].items.map(it=>Number(it?.id)||0));
       state.cross.elemCommon[sideKey].nextId = mx + 1;
@@ -2626,6 +2633,7 @@ const ensureElemOverrideInitialized = (staKey)=>{
       state.cross.elemOverrides[staKey][side] = { items:[], nextId:1 };
     }
     if (!Array.isArray(state.cross.elemOverrides[staKey][side].items)) state.cross.elemOverrides[staKey][side].items = [];
+    if (!Number.isFinite(Number(state.cross.elemOverrides[staKey][side].anchorId))) state.cross.elemOverrides[staKey][side].anchorId = 0;
     if (!state.cross.elemOverrides[staKey][side].items.length && Array.isArray(state.cross.overrides?.[staKey]?.[side]?.segs) && state.cross.overrides[staKey][side].segs.length) {
       state.cross.elemOverrides[staKey][side].items = buildElemFromSegs(state.cross.overrides[staKey][side].segs);
       state.cross.elemOverrides[staKey][side].nextId = Math.max(0, ...state.cross.elemOverrides[staKey][side].items.map(it=>it.id||0)) + 1;
@@ -2683,6 +2691,7 @@ const renderCrossElemListHtml = (sideKey)=>{
   const store = getActiveElemStore(sideKey);
   const items = store?.items || [];
   const selId = Number(state.cross.ui?.elemSel?.[sideKey] || 0);
+  const anchorId = Number(store?.anchorId || 0);
 
   const optType = (v)=>[
     ['PAV','路面(%)'],['STEP','段差'],['SLOPE_H','法面(H)'],['SLOPE_EXT','法面(延長)'],['FLAT','水平(0%)']
@@ -2740,6 +2749,13 @@ const renderCrossElemListHtml = (sideKey)=>{
                 <select class="xsElInput" data-xs-side="${sideKey}" data-xs-id="${id}" data-xs-field="type">
                   ${optType(type)}
                 </select>
+              </div>
+              <div style="width:150px;">
+                <label>幅員固定点</label>
+                <div class="mini" style="display:flex; align-items:center; gap:6px;">
+                  <input type="checkbox" class="xsAnchorPick" data-xs-side="${sideKey}" data-xs-id="${id}" ${id===anchorId?"checked":""} />
+                  <span>${sideKey==="right"?"右":"左"}</span>
+                </div>
               </div>
               <div style="flex:1; min-width:260px;">
                 ${inputs}
@@ -2889,6 +2905,52 @@ const computeCrossSide = (scope, side, staKey)=>{
     start = end;
   }
   return { rows, lastEnd: start, lastZ: z, warnings };
+};
+
+const evalCrossZAtX = (rows, x)=>{
+  rows = Array.isArray(rows) ? rows : [];
+  x = Number(x);
+  if (!Number.isFinite(x)) return 0;
+  let z = 0;
+  for (const r of rows) {
+    const start = Number(r.start)||0;
+    const end = Number(r.end)||0;
+    const slopePct = Number(r.slopePct)||0;
+    const stepDz = Number(r.stepDz)||0;
+    if (x <= start + 1e-12) return z;
+    const segEnd = Math.min(x, end);
+    const span = Math.max(0, segEnd - start);
+    z += (slopePct/100.0) * span;
+    if (x >= end - 1e-12) z += stepDz;
+    if (x <= end + 1e-12) return z;
+  }
+  return z;
+};
+
+const calcAnchorWidthFromElems = (items, anchorId, sideKey, widthLimit)=>{
+  items = Array.isArray(items) ? items : [];
+  anchorId = Number(anchorId)||0;
+  widthLimit = Number(widthLimit)||0;
+  let x = 0;
+  for (const it of items) {
+    const id = Number(it?.id)||0;
+    const type = String(it?.type||'PAV');
+    if (type==='PAV' || type==='FLAT') x += Number(it?.L)||0;
+    else if (type==='SLOPE_H') x += (Number(it?.ratioX)||0) * (Number(it?.H)||0);
+    else if (type==='SLOPE_EXT') x = widthLimit;
+    // STEP: no x
+    if (id===anchorId) return Math.max(0, x);
+  }
+  return null;
+};
+
+const getElemStoreForStaKey = (staKey, sideKey)=>{
+  ensureCrossState();
+  staKey = String(staKey||'').trim().replace(/^STA\s*/i,'').trim();
+  if (staKey && state.cross.elemOverrides && state.cross.elemOverrides[staKey] && state.cross.elemOverrides[staKey][sideKey]) {
+    return state.cross.elemOverrides[staKey][sideKey];
+  }
+  return state.cross.elemCommon?.[sideKey] || null;
 };
 
 
@@ -5768,6 +5830,10 @@ const cr = computeCrossSide("common", "right");
   viewCross.innerHTML = `
     <div class="card" id="secCross">
       <h2>横断：エレメント（中心 → 外側）</h2>
+      <div class="row" id="xsEditTargetRow" style="margin-top:6px; align-items:center;">
+        <div class="mini" id="xsEditTargetInfo" style="flex:1;"></div>
+        <button class="btn btn-ok" id="xsPromoteStandardToOverride" style="display:none;">この測点を例外として保存</button>
+      </div>
       <div class="mini">中心から外側へ、任意距離で勾配変化点を作れます。距離は自動で昇順に整列されます。</div>
 
       <div class="grid grid-2" style="margin-top:10px;">
@@ -5798,6 +5864,27 @@ const cr = computeCrossSide("common", "right");
 
 
 
+
+      <div class="sep"></div>
+      <h2 style="margin-top:0;">横断作成済み全STA一覧（図面STA）</h2>
+      <div class="mini">図面から取得したSTAだけを距離の短い順に表示します。〔標準〕はテンプレ適用、〔例外〕は測点別断面が存在します。</div>
+
+      <div class="row" style="margin-top:10px; align-items:flex-end;">
+        <div style="width:320px; max-width:100%;">
+          <label>STA（距離昇順 / 標準・例外タグ付き）</label>
+          <select id="xsAllStaSel">
+            <option value="">（選択なし）</option>
+          </select>
+        </div>
+        <div style="width:200px;">
+          <label>編集</label>
+          <button class="btn" id="xsAllStaEditBtn">このSTAを編集対象にする</button>
+        </div>
+        <div style="flex:1; min-width:240px;">
+          <div class="mini" id="xsAllStaMsg"></div>
+        </div>
+      </div>
+
       <div class="row" style="margin-top:10px;">
         <div style="width:200px;">
           <label>横断範囲（クリップ） 右(+)(m)</label>
@@ -5815,24 +5902,6 @@ const cr = computeCrossSide("common", "right");
           </div>
         </div>
 
-      </div>
-
-      <div class="row" style="margin-top:10px; align-items:flex-end;">
-        <div style="width:180px;">
-          <label>拡幅割付（線形）</label>
-          <label class="mini"><input id="xsTaperEnabled" type="checkbox" ${state.cross.taper && state.cross.taper.enabled ? "checked" : ""} /> 有効</label>
-        </div>
-        <div style="width:200px;">
-          <label>アンカー距離 右(+)(m)</label>
-          <input id="xsAnchorRight" type="number" step="0.001" min="0" value="${Number(state.cross.taper?.anchorRight ?? 3.0).toFixed(3)}" />
-        </div>
-        <div style="width:200px;">
-          <label>アンカー距離 左(-)(m)</label>
-          <input id="xsAnchorLeft" type="number" step="0.001" min="0" value="${Number(state.cross.taper?.anchorLeft ?? 3.0).toFixed(3)}" />
-        </div>
-        <div style="flex:1; min-width:260px;">
-          <div class="mini">例外測点の最外端距離を制御点として幅員を線形補間し、アンカーより外側の距離をシフトして割付します（左右独立）。</div>
-        </div>
       </div>
 
       <div class="grid grid-2" style="margin-top:10px;">
@@ -5959,7 +6028,30 @@ const cr = computeCrossSide("common", "right");
       </div>
       <div class="mini" id="xsPreviewTable" style="margin-top:10px;"></div>
 
+      
       <div class="sep"></div>
+      <h2 style="margin-top:0;">横断範囲とアンカー</h2>
+      <div class="mini">基本は空白（未入力）で横断幅の制限なし。必要なときだけ拡幅割付とアンカー距離を設定します。</div>
+      <div class="row" style="margin-top:10px; align-items:flex-end;">
+        <div style="width:180px;">
+          <label>拡幅割付（線形）</label>
+          <label class="mini"><input id="xsTaperEnabled" type="checkbox" ${state.cross.taper && state.cross.taper.enabled ? "checked" : ""} /> 有効</label>
+        </div>
+        <div style="width:200px;">
+          <label>アンカー距離 右(+)(m)</label>
+          <input id="xsAnchorRight" type="number" step="0.001" min="0" value="${Number(state.cross.taper?.anchorRight ?? 3.0).toFixed(3)}" />
+        </div>
+        <div style="width:200px;">
+          <label>アンカー距離 左(-)(m)</label>
+          <input id="xsAnchorLeft" type="number" step="0.001" min="0" value="${Number(state.cross.taper?.anchorLeft ?? 3.0).toFixed(3)}" />
+        </div>
+        <div style="flex:1; min-width:260px;">
+          <div class="mini">例外測点の最外端距離を制御点として幅員を線形補間し、アンカーより外側の距離をシフトして割付します（左右独立）。</div>
+        </div>
+      </div>
+
+      
+<div class="sep"></div>
       <h3 style="margin:0;">指定点の計画標高</h3>
       <div class="mini">STA＋左右＋幅を入れると、その点を簡易横断図（緑丸）と平面図にプロットして計画標高を表示します。</div>
       <div class="grid grid-3" style="margin-top:10px;">
@@ -6076,6 +6168,12 @@ const cr = computeCrossSide("common", "right");
         if (which !== 4 && which !== 5) throw new Error('ファイル名から（4）（5）（6）の判定ができませんでした');
 
         const stas = dxfFindStaListNearCL(dxfText);
+        // store drawing STA list (図面STA母集団)
+        ensureCrossState();
+        const prev = Array.isArray(state.cross.ui.drawingStaList) ? state.cross.ui.drawingStaList : [];
+        const merged = prev.concat(stas);
+        state.cross.ui.drawingStaList = Array.from(new Set(merged.map(v=>Number(v)).filter(v=>Number.isFinite(v)).map(v=>Number(v.toFixed(3))))).sort((a,b)=>a-b);
+
         if (!stas.length) throw new Error('STA表記が見つかりませんでした（CL付近の STA 0+.. 表記を確認してください）');
         const tpl = getStdCrossTemplate(which);
         for (const m of stas){
@@ -6201,6 +6299,22 @@ const cr = computeCrossSide("common", "right");
 
     // inputs
     list.addEventListener('change', (ev)=>{
+      const ap = ev.target.closest('.xsAnchorPick');
+      if (ap) {
+        const id = Number(ap.dataset.xsId);
+        const side = String(ap.dataset.xsSide||sideKey);
+        const store = getActiveElemStore(side);
+        if (!store) return;
+        const checked = !!ap.checked;
+        store.anchorId = checked ? id : 0;
+        // single-select per side
+        if (checked) {
+          // nothing else needed; rerender will reflect
+        }
+        saveState();
+        render();
+        return;
+      }
       const el = ev.target.closest('.xsElInput');
       if (!el) return;
       const id = Number(el.dataset.xsId);
@@ -6546,7 +6660,100 @@ const cr = computeCrossSide("common", "right");
     };
   }
 
-  // preview
+  
+  // 図面STA一覧（距離昇順 / 標準・例外タグ）
+  const allStaSel = document.getElementById('xsAllStaSel');
+  const allStaBtn = document.getElementById('xsAllStaEditBtn');
+  const allStaMsg = document.getElementById('xsAllStaMsg');
+  if (allStaSel) {
+    ensureCrossState();
+    // source: drawingStaList (図面STA) があればそれを優先。無ければ overrides のキーを暫定母集団にする
+    const raw = Array.isArray(state.cross.ui?.drawingStaList) ? state.cross.ui.drawingStaList : [];
+    let stas = raw.filter(v=>v!==null && v!==undefined && v!=="").map(v=>Number(v)).filter(v=>Number.isFinite(v));
+    if (!stas.length) {
+      stas = Object.keys(state.cross.overrides||{}).map(k=>Number(k)).filter(v=>Number.isFinite(v));
+    }
+    // unique + sort asc
+    stas = Array.from(new Set(stas.map(v=>Number(v.toFixed(3))))).sort((a,b)=>a-b);
+
+    const cur = String(state.cross.ui?.editStaTok||'').trim();
+    let html = '<option value="">（選択なし）</option>';
+    for (const v of stas) {
+      const k = v.toFixed(3);
+      const isOv = !!(state.cross.overrides && state.cross.overrides[k]);
+      const tag = isOv ? '〔例外〕' : '〔標準〕';
+      const sel = (cur && k===cur) ? 'selected' : '';
+      html += `<option value="${k}" ${sel}>STA ${k} ${tag}</option>`;
+    }
+    allStaSel.innerHTML = html;
+  }
+  if (allStaBtn) {
+    allStaBtn.onclick = ()=>{
+      ensureCrossState();
+      const tok = String((allStaSel && allStaSel.value) ? allStaSel.value : '').trim();
+      if (!tok) { if (allStaMsg) allStaMsg.textContent = 'STAを選んでください。'; return; }
+      state.cross.ui.editStaTok = tok;
+
+      const isOv = !!(state.cross.overrides && state.cross.overrides[tok]);
+      if (isOv) {
+        state.cross.ui.elemMode = 'override';
+        state.cross.ui.overrideSel = tok;
+        state.cross.ui.standardEditStaTok = '';
+        if (allStaMsg) allStaMsg.textContent = `編集対象：STA ${tok}（例外）`;
+      } else {
+        // 標準を表示しつつ、このSTAを“標準として確認/編集”の対象にする
+        state.cross.ui.elemMode = 'common';
+        state.cross.ui.overrideSel = '';
+        state.cross.ui.standardEditStaTok = tok; // 保存時に例外化するための文脈
+        if (allStaMsg) allStaMsg.textContent = `編集対象：STA ${tok}（標準）→ 保存すると例外になります`;
+      }
+      saveState();
+      render();
+    };
+  }
+
+  // 編集対象の表示 + 「標準→例外として保存」
+  const tgtInfo = document.getElementById('xsEditTargetInfo');
+  const promoteBtn = document.getElementById('xsPromoteStandardToOverride');
+  if (tgtInfo) {
+    ensureCrossState();
+    const tok = String(state.cross.ui?.editStaTok||'').trim();
+    const isOv = tok && !!(state.cross.overrides && state.cross.overrides[tok]);
+    const isStdCtx = tok && !isOv && String(state.cross.ui?.standardEditStaTok||'').trim()===tok;
+    if (!tok) {
+      tgtInfo.textContent = '編集対象：未選択（図面STA一覧から選ぶと安全です）';
+    } else if (isOv) {
+      tgtInfo.textContent = `編集対象：STA ${tok}（例外）`;
+    } else if (isStdCtx) {
+      tgtInfo.textContent = `編集対象：STA ${tok}（標準）  ※保存すると例外として登録`;
+    } else {
+      tgtInfo.textContent = `編集対象：STA ${tok}（標準）`;
+    }
+
+    if (promoteBtn) {
+      if (isStdCtx) {
+        promoteBtn.style.display = '';
+        promoteBtn.onclick = ()=>{
+          ensureCrossState();
+          const k = String(state.cross.ui?.editStaTok||'').trim();
+          if (!k) return;
+          if (!confirm(`STA ${k} は標準です。現在の編集内容を「例外断面」として登録します。\n（標準テンプレは変更されません）\nよいですか？`)) return;
+
+          // effective common -> override template copy
+          const tpl = { right: deepCopy(state.cross.right), left: deepCopy(state.cross.left) };
+          state.cross.overrides[k] = tpl;
+          state.cross.ui.elemMode = 'override';
+          state.cross.ui.overrideSel = k;
+          state.cross.ui.standardEditStaTok = '';
+          saveState();
+          render();
+        };
+      } else {
+        promoteBtn.style.display = 'none';
+      }
+    }
+  }
+// preview
   const drawPreview = (tok)=>{
     const infoEl = document.getElementById('xsPreviewInfo');
     const tblEl = document.getElementById('xsPreviewTable');
@@ -6606,6 +6813,34 @@ const cr = computeCrossSide("common", "right");
         landmarks.push({ key:`L_STEP_UP_${stepIdxL}`, label:`左 段差上 #${stepIdxL}`, x, z:zUp });
         landmarks.push({ key:`L_STEP_DN_${stepIdxL}`, label:`左 段差下 #${stepIdxL}`, x, z:zDown });
       }
+    }
+
+    // width fixed points (display only)
+    const staKeyForAnchor = String(tok||'').trim().replace(/^STA\s*/i,'').trim();
+    try {
+      const xr = getXrangeForStaKey(staKeyForAnchor);
+      // right
+      const stR = getElemStoreForStaKey(staKeyForAnchor, 'right');
+      const aR = Number(stR?.anchorId||0);
+      if (aR>0) {
+        const wR = calcAnchorWidthFromElems(stR?.items||[], aR, 'right', xr.R);
+        if (Number.isFinite(wR)) {
+          const zR = evalCrossZAtX(rCalc.rows, wR);
+          landmarks.push({ key:'ANCHOR_R', label:`幅員固定点（右） W=${wR.toFixed(3)}m`, x:wR, z:zR });
+        }
+      }
+      // left
+      const stL = getElemStoreForStaKey(staKeyForAnchor, 'left');
+      const aL = Number(stL?.anchorId||0);
+      if (aL>0) {
+        const wL = calcAnchorWidthFromElems(stL?.items||[], aL, 'left', xr.L);
+        if (Number.isFinite(wL)) {
+          const zL = evalCrossZAtX(lCalc.rows, wL);
+          landmarks.push({ key:'ANCHOR_L', label:`幅員固定点（左） W=${wL.toFixed(3)}m`, x:-wL, z:zL });
+        }
+      }
+    } catch(e) {
+      // ignore
     }
 
     // slope shoulders/toes (from element-generated segs only: row.src==='SLOPE')
